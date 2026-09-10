@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
@@ -12,6 +12,7 @@ import {
 import { BulkEventForm } from "@/components/forms/BulkEventForm";
 import { generateId } from "@/utils/id";
 import { todayLocalDateString } from "@/utils/date";
+import { deleteDraftSession } from "@/services/attachmentDraftStorage";
 import { defaultEndTime, resolveDefaultCalendarId, resolveDefaultEventStart, resolveEndDate } from "@/utils/time";
 import { colors } from "@/theme/colors";
 import { minTapSize, spacing } from "@/theme/spacing";
@@ -58,20 +59,40 @@ function NewEventScreenInner() {
   // openedAtの変化をNormalEventForm/BulkEventFormのkeyに使うことで両フォームを完全に
   // 再マウントし、以前開いた時点の古い日時・入力内容が残り続けないようにする。
   const [openedAt, setOpenedAt] = useState(() => new Date());
+  // 2026-07-31: draftEventId／draftSessionIdは、この画面インスタンスが最初にマウントされた
   // 時にだけ1回発行し、以後はコンポーネントが生存している間ずっと不変にする。
   // 以前はuseFocusEffect内で毎回再生成しており、「フォーカスの再取得」を「新しい作成
   // セッションの開始」と誤って同一視していた——画像ピッカー・プレビュー・日付/時刻ピッカー
   // 自体はReact Navigationのルート遷移を伴わないため通常は再フォーカスを起こさないが、
   // 将来この画面から他画面をpush（位置情報選択・テンプレート選択等）して戻るケースが
+  // 追加された場合、その再フォーカスだけでID・ドラフトが失われてしまう設計上の不備だった。
   // openedAtの更新（現在時刻の取り直し）とこのID発行は意図的に分離し、openedAtが
+  // 変化してもdraftEventId／draftSessionIdは変わらない。
   const [draftEventId] = useState(() => generateId("evt"));
+  const [draftSessionId] = useState(() => generateId("draft"));
   useFocusEffect(
     useCallback(() => {
       setOpenedAt(new Date());
     }, [])
   );
+  // draftSessionIdは画面が生存する間ずっと不変のため、このクリーンアップは実質的に
   // 「この画面インスタンスが本当にアンマウントされた時」にのみ実行される
+  // （フォーカスを失っただけ・再フォーカスしただけでは実行されない）。予定保存＋添付
+  // コミットが成功した分のドラフトファイルはコミット時に個別削除済みのため、ここで
+  // 消しても正式登録済みの添付（別ディレクトリ/Storage/DB）には影響しない。コミットに
+  // 失敗して残っているドラフトも、画面が本当に閉じられた時点で確実に破棄する
+  // （未保存の画像を保持し続けない）。deleteDraftSession自体はディレクトリが既に
   // 存在しない場合は何もしない設計のため、二重に呼ばれても安全（冪等）。
+  useEffect(() => {
+    return () => {
+      deleteDraftSession(draftSessionId).catch((e) => {
+        if (__DEV__) {
+          // eslint-disable-next-line no-console -- 開発時のみ。ドラフトID以外の内容は出力しない
+          console.warn("[event/new] ドラフトディレクトリの削除に失敗しました（次回の孤立ファイル清掃で対象にできる）", draftSessionId, e);
+        }
+      });
+    };
+  }, [draftSessionId]);
 
   // タイムラインのタップ（週・日表示）で開いた場合はparams.date/startTimeが渡され、
   // タップした日付・時刻（1分単位、15分スナップなし）を優先する。
@@ -242,6 +263,7 @@ function NewEventScreenInner() {
           onSave={handleSave}
           onSaveComplete={handleSaveComplete}
           eventId={draftEventId}
+          draftSessionId={draftSessionId}
         />
       ) : (
         <BulkEventForm

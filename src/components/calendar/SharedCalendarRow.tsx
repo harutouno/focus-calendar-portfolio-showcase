@@ -1,10 +1,11 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { DefaultCalendarCover } from "./DefaultCalendarCover";
+import { CoverImage } from "./CoverImage";
 import { Avatar } from "@/components/common/Avatar";
 import { JoinedCalendarSummary } from "@/types/sharing";
 import { joinedStatusLabel } from "@/utils/calendarListRows";
+import { useSignedCoverUrl } from "@/hooks/useSignedCoverUrl";
 import { colors } from "@/theme/colors";
 import { minTapSize, radius, spacing } from "@/theme/spacing";
 import { useLocale } from "@/context/LocaleContext";
@@ -33,6 +34,7 @@ export function SharedCalendarRow({ summary, visible, onToggleVisible, onPress, 
   const { t } = useLocale();
   const { calendar, role, memberCount, memberPreviews } = summary;
   const overflowCount = memberPreviews.length > MAX_ROW_AVATARS ? memberCount - MAX_ROW_AVATARS : 0;
+  const coverUri = useSignedCoverUrl(calendar.coverImageUrl);
 
   return (
     <View style={styles.row}>
@@ -62,7 +64,7 @@ export function SharedCalendarRow({ summary, visible, onToggleVisible, onPress, 
         })}
       >
         <View style={styles.cover}>
-          <DefaultCalendarCover color={calendar.color} icon="people-outline" iconSize={22} />
+          <CoverImage uri={coverUri} color={calendar.color} icon="people-outline" iconSize={22} />
         </View>
         <View style={styles.textWrap}>
           <Text style={styles.name} numberOfLines={2}>

@@ -52,6 +52,10 @@ import { toggleCalendarVisibility, dedupePreserveOrder, ToggleVisibilityResult }
 import { EventDisplayMode, applyEventDisplayMode } from "@/utils/eventDisplayMode";
 import { resolveEndDate } from "@/utils/time";
 import { runPostPrimaryStep } from "@/utils/postPrimary";
+import { deleteLocalCalendarCoverImage } from "@/services/localImageStorage";
+import { cleanupOrphanedAttachmentDrafts } from "@/services/attachmentDraftStorage";
+import { retryPendingAttachmentCleanups } from "@/services/cloudAttachmentRepository";
+import { retryPendingAttachmentMigrations } from "@/services/attachmentMigrationService";
 import { useAuth } from "@/context/AuthContext";
 import { getCurrentAuthIdentity } from "@/auth/authSessionIdentityStore";
 import {
@@ -66,6 +70,7 @@ import {
   captureSharedMutationAuthSnapshot,
 } from "@/auth/sharedMutationAuthSnapshot";
 import { canCreateMyCalendar } from "@/constants/calendarLimits";
+import { usePremiumStatus } from "@/hooks/usePremiumStatus";
 import {
   AcceptInviteResult,
   acceptPendingInviteById,
@@ -982,11 +987,17 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
    */
   const userCalendarsRef = useRef(userCalendars);
   /**
-   * だが、addUserCalendarの上限判定は直列化された実行時点の最新状態で行いたい
-   * （同時に進む状態更新との競合をふさぐため）。レンダー本体で毎回同期的に
+   * [P0096 DATA-F018-003] isPremiumはレンダーごとのクロージャ値（usePremiumStatus()由来）
+   * だが、addUserCalendarの上限判定は直列化された実行時点の最新の資格状態で行いたい
+   * （「premium entitlement transition」との競合をふさぐため）。レンダー本体で毎回同期的に
    * 更新するrefを使う（この代入自体はJSXの出力に影響しない副作用の無い操作のため、
-   * レンダー中に行っても安全）。
+   * レンダー中に行っても安全）。isPremiumも同じ理由でisPremiumRef.current（実行時点の
+   * 最新の資格状態）を使う。
    */
+  // フォールバックするため、PremiumProviderでラップしない既存テストは壊れない。
+  const isPremium = usePremiumStatus();
+  const isPremiumRef = useRef(isPremium);
+  isPremiumRef.current = isPremium;
   const [favoriteCalendarIds, setFavoriteCalendarIds] = useState<string[]>([]);
   const favoriteCalendarIdsRef = useRef(favoriteCalendarIds);
   const [lastUsedCalendarId, setLastUsedCalendarId] = useState<string | null>(null);
@@ -1253,6 +1264,40 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         );
       }
     });
+    // DATA-F002-003: 前回プロセスの孤立ドラフト添付ディレクトリを、必須データの復元より前に
+    // 同期的に一括削除する（cleanupOrphanedAttachmentDrafts自体は同期処理のため、
+    // await不要）。
+    try {
+      cleanupOrphanedAttachmentDrafts();
+    } catch (e) {
+      if (__DEV__) {
+        console.warn(
+          "[AppDataContext] 孤立ドラフト添付の清掃に失敗しました（次回起動時に再試行されます）",
+          e instanceof Error ? e.message : "unknown error"
+        );
+      }
+    }
+    // Round 12（SEC-F007-004、P1-2）: 共有添付画像のStorage/DB後始末が完了できなかった対象を
+    // ここで再試行する。
+    retryPendingAttachmentCleanups().catch((e) => {
+      if (__DEV__) {
+        console.warn(
+          "[AppDataContext] 未完了の添付クリーンアップの再試行に失敗しました",
+          e instanceof Error ? e.message : "unknown error"
+        );
+      }
+    });
+    // P0040（15節）: 前回起動時までに完了できなかったC14 attachment migration
+    // （shared calendar間の予定移動）も同様にここで再試行する。retryPendingAttachmentMigrations
+    // 自身が現在ログイン中のidentityを自己解決し、未ログイン時は何もしない（self-gate）。
+    retryPendingAttachmentMigrations().catch((e) => {
+      if (__DEV__) {
+        console.warn(
+          "[AppDataContext] 未完了の添付migrationの再試行に失敗しました",
+          e instanceof Error ? e.message : "unknown error"
+        );
+      }
+    });
     try {
       await applySeedDataIfNeeded(t);
       await Promise.all([refresh(), refreshFocusHistory()]);
@@ -1472,6 +1517,26 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         );
       }
     });
+    // 添付クリーンアップも合わせて再試行する（新しいidentityが同じownerUserIdを再ログイン
+    // したケースを含む）に、以前の切替で完了できなかったC14 attachment migrationも合わせて
+    // 再試行する。retryPendingAttachmentMigrationsは未ログイン（sign-out）時は自己gateで
+    // 何もしない。
+    retryPendingAttachmentCleanups().catch((e) => {
+      if (__DEV__) {
+        console.warn(
+          "[AppDataContext] identity変化時の添付クリーンアップ再試行に失敗しました",
+          e instanceof Error ? e.message : "unknown error"
+        );
+      }
+    });
+    retryPendingAttachmentMigrations().catch((e) => {
+      if (__DEV__) {
+        console.warn(
+          "[AppDataContext] identity変化時の添付migration再試行に失敗しました",
+          e instanceof Error ? e.message : "unknown error"
+        );
+      }
+    });
 
     if (nextUserId && nextSessionInstanceId) {
       // REVISE対応（P2-2、再監査）: 以前はここで（初回解決でなければ）sharedSettledRef.current
@@ -1554,6 +1619,28 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         if (__DEV__) {
           console.warn(
             "[AppDataContext] AppState復帰時の共有通知セキュリティバリア再試行に失敗しました",
+            e instanceof Error ? e.message : "unknown error"
+          );
+        }
+      });
+      // Round 12（SEC-F007-004、P1-2）: 同じく、添付クリーンアップの再試行にもAppState「active」
+      // 復帰のタイミングに相乗りする。
+      retryPendingAttachmentCleanups().catch((e) => {
+        if (__DEV__) {
+          console.warn(
+            "[AppDataContext] AppState復帰時の添付クリーンアップ再試行に失敗しました",
+            e instanceof Error ? e.message : "unknown error"
+          );
+        }
+      });
+      // P0040（15節）: 同じく、C14 attachment migrationの再試行にもAppState「active」
+      // 復帰のタイミングに相乗りする。retryPendingAttachmentMigrations自身のmodule-level
+      // single-flight+rerunにより、identity変化effectと近い時間帯に発火しても
+      // 重複したremote副作用にはならない。
+      retryPendingAttachmentMigrations().catch((e) => {
+        if (__DEV__) {
+          console.warn(
+            "[AppDataContext] AppState復帰時の添付migration再試行に失敗しました",
             e instanceof Error ? e.message : "unknown error"
           );
         }
@@ -2515,7 +2602,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       if (latest.some((c) => c.id === calendar.id)) {
         throw new Error("my_calendar_duplicate_id");
       }
-      if (!canCreateMyCalendar(latest)) {
+      if (!canCreateMyCalendar(latest, isPremiumRef.current)) {
         throw new Error("my_calendar_limit_exceeded");
       }
       const next = [...latest, calendar];
@@ -2544,21 +2631,36 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const removeUserCalendar = useCallback(async (id: string) => {
     // [P0094 ROBUST-F018-002] 削除できない基本カレンダー（自分一人用）は、UI側
     // （CalendarActionSheet.tsx）で削除行自体を出していないだけで、この権威となる関数
-    // 自体には歯止めが無かった。ここが最終防波堤——storage/React state/
+    // 自体には歯止めが無かった。ここが最終防波堤——storage/React state/カバー画像削除/
     // 表示設定クリーンアップのいずれも一切行わず、新しいUI文言・エラーも追加しない
     // （既存の「何も起きない」契約のまま無条件でno-opにする）。
     if (id === BASE_CALENDAR_ID) {
       return;
     }
+    let removedCoverImageUri: string | undefined;
     await enqueueLocalCalendarLifecycleOperation(async () => {
       const latest = userCalendarsRef.current;
+      const removed = latest.find((c) => c.id === id);
+      removedCoverImageUri = removed?.coverImageUri;
       const next = latest.filter((c) => c.id !== id);
       await saveUserCalendars(next);
       userCalendarsRef.current = next;
       setUserCalendars(next);
     });
     // [P0096] カレンダー削除本体（storage書込み＋React state反映）が直列化された操作の中で
-    // 既に確定した"後"にだけ、表示設定クリーンアップを行う。
+    // 既に確定した"後"にだけ、カバー画像削除・表示設定クリーンアップを行う
+    // （削除本体がまだcommitされていない段階でカバー画像を先に消してしまうと、
+    // 万一削除本体側が失敗した場合に画像だけ失われた不整合な状態になりうるため）。
+    // 端末内に保存したカバー画像ファイルも一緒に破棄する（存在しなくてもエラーにならない冪等操作）。
+    // [P0120 Group D / D9 ROBUST-POSTPRIMARY-001-C13] ただし「存在しない」以外の実FS削除
+    // エラーはlocalImageStorage.ts側でthrowされる。カレンダー削除本体は直前の直列化操作で
+    // 既にdurableに確定しているため、この後始末の失敗を削除の失敗として再定義してはならない
+    // （呼び出し元 CalendarActionSheet.tsx / settings.tsx はcatchで「削除できませんでした」を
+    // 表示する＝実際には削除済みなのに失敗と伝える偽の失敗になっていた。G-16と同型）。
+    // 削除順序（durable削除の"後"にだけカバーを消す）・冪等性は変更しない。
+    await runPostPrimaryStep("マイカレンダー削除後のカバー画像後始末", () =>
+      deleteLocalCalendarCoverImage(removedCoverImageUri)
+    );
     // 表示設定に残っていても実害はないが、掃除しておく（共有カレンダー削除時と同じ方針）。
     // P0017 Batch1.4、P1(セクション6): 以前はここでsaveOverlaySettings/setOverlaySettingsを
     // 直接呼び、owner-bound coordinatorを迂回していた（direct local writer）。他のoverlay

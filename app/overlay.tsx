@@ -9,7 +9,7 @@ import { ScreenHeader } from "@/components/common/ScreenHeader";
 import { SectionCard } from "@/components/common/SectionCard";
 import { PageLayout } from "@/components/common/PageLayout";
 import { NewCalendarModal } from "@/components/forms/NewCalendarModal";
-import { DefaultCalendarCover } from "@/components/calendar/DefaultCalendarCover";
+import { CoverImage } from "@/components/calendar/CoverImage";
 import {
   classifySharedCalendars,
   joinedStatusLabel,
@@ -17,13 +17,16 @@ import {
   soloOwnerStatusLabel,
 } from "@/utils/calendarListRows";
 import {
-  SHARED_CALENDAR_LIMIT,
+  FREE_SHARED_CALENDAR_LIMIT,
+  PREMIUM_SHARED_CALENDAR_LIMIT,
   countOwnedSharedCalendars,
   getMyCalendarLimit,
   isBaseCalendar,
   remainingMyCalendars,
   totalMyCalendars,
 } from "@/constants/calendarLimits";
+import { usePremiumStatus } from "@/hooks/usePremiumStatus";
+import { useSignedCoverUrl } from "@/hooks/useSignedCoverUrl";
 import { generateId } from "@/utils/id";
 import { toFriendlyMessage } from "@/utils/friendlyError";
 import { colors } from "@/theme/colors";
@@ -34,6 +37,7 @@ interface CalendarRowItem {
   id: string;
   name: string;
   color: string;
+  coverImageUrl?: string;
   statusText?: string;
   /** 基本カレンダー「自分一人用」はこの画面からは編集導線を出さない（マイカレンダー画面から編集する） */
   editable: boolean;
@@ -52,6 +56,10 @@ function CalendarRow({
   onPressManage: () => void;
   manageA11yLabel: string;
 }) {
+  // item.coverImageUrlはローカルカレンダーのfile://と共有カレンダーの値が混在するフィールド。
+  // このHookは共有カレンダー由来の値だけを署名付きURLへ解決し、ローカルのfile://は
+  // そのまま素通しする（マイカレンダー画像の表示は一切変化しない）。
+  const coverUri = useSignedCoverUrl(item.coverImageUrl);
   return (
     <Pressable
       style={styles.calendarRow}
@@ -66,7 +74,7 @@ function CalendarRow({
         color={checked ? colors.primary : colors.borderStrong}
       />
       <View style={styles.coverDot}>
-        <DefaultCalendarCover color={item.color} />
+        <CoverImage uri={coverUri} color={item.color} />
       </View>
       <View style={styles.rowTextWrap}>
         <Text style={styles.rowName} numberOfLines={1}>
@@ -139,14 +147,15 @@ export default function OverlayScreen() {
     createSharedCalendar,
   } = useAppData();
   const [createModalVisible, setCreateModalVisible] = useState(false);
+  const isPremium = usePremiumStatus();
 
-  const myCalendarLimit = getMyCalendarLimit();
-  const sharedCalendarLimit = SHARED_CALENDAR_LIMIT;
+  const myCalendarLimit = getMyCalendarLimit(isPremium);
+  const sharedCalendarLimit = isPremium ? PREMIUM_SHARED_CALENDAR_LIMIT : FREE_SHARED_CALENDAR_LIMIT;
 
   const { solo, owner, joined } = classifySharedCalendars(sharedCalendars);
   const myCalendarCount = totalMyCalendars(userCalendars);
   const ownedSharedCalendarCount = countOwnedSharedCalendars(sharedCalendars);
-  const myCalendarRemaining = remainingMyCalendars(userCalendars);
+  const myCalendarRemaining = remainingMyCalendars(userCalendars, isPremium);
   const sharedCalendarRemaining = sharedCalendarLimit - ownedSharedCalendarCount;
 
   // 2026-08: 「main」（自分一人用）はAppDataContext.refresh()が起動時に実体化するため、
@@ -155,6 +164,7 @@ export default function OverlayScreen() {
     id: c.id,
     name: c.name,
     color: c.color,
+    coverImageUrl: c.coverImageUri,
     editable: !isBaseCalendar(c.id),
   }));
 
@@ -163,6 +173,7 @@ export default function OverlayScreen() {
       id: s.calendar.id,
       name: s.calendar.name,
       color: s.calendar.color,
+      coverImageUrl: s.calendar.coverImageUrl,
       statusText: soloOwnerStatusLabel(t),
       editable: true,
     })),
@@ -170,6 +181,7 @@ export default function OverlayScreen() {
       id: s.calendar.id,
       name: s.calendar.name,
       color: s.calendar.color,
+      coverImageUrl: s.calendar.coverImageUrl,
       statusText: ownerStatusLabel(s.memberCount, t),
       editable: true,
     })),
@@ -177,6 +189,7 @@ export default function OverlayScreen() {
       id: s.calendar.id,
       name: s.calendar.name,
       color: s.calendar.color,
+      coverImageUrl: s.calendar.coverImageUrl,
       statusText: joinedStatusLabel(s.role, s.memberCount, t),
       editable: true,
     })),

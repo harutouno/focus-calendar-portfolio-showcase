@@ -1,7 +1,8 @@
 import React from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
-import { DefaultCalendarCover } from "./DefaultCalendarCover";
+import { CoverImage } from "./CoverImage";
 import { PendingInvite } from "@/types/sharing";
+import { useSignedCoverUrl } from "@/hooks/useSignedCoverUrl";
 import { useLocale } from "@/context/LocaleContext";
 import { TranslationKey } from "@/i18n/translations";
 import { colors } from "@/theme/colors";
@@ -29,17 +30,19 @@ interface Props {
 
 /**
  * 招待タブに表示する、自分宛てに届いている未処理招待1件分のカード。
+ * カバー画像はSharedCalendarRow/CalendarCardと同じuseSignedCoverUrl経由で
  * 署名付きURLを解決する（private Storageの仕組みをそのまま再利用する）。
  */
 export function InvitationCard({ invite, onAccept, onDecline, accepting, declining }: Props) {
   const { t } = useLocale();
+  const coverUri = useSignedCoverUrl(invite.calendarCoverImageUrl);
   const busy = accepting || declining;
 
   return (
     <View style={styles.card}>
       <View style={styles.headerRow}>
         <View style={styles.cover}>
-          <DefaultCalendarCover color={invite.calendarColor} icon="people-outline" iconSize={20} />
+          <CoverImage uri={coverUri} color={invite.calendarColor} icon="people-outline" iconSize={20} />
         </View>
         <View style={styles.textWrap}>
           <Text style={styles.name} numberOfLines={2}>

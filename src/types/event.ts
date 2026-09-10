@@ -41,6 +41,8 @@ export interface UserCalendar {
   name: string;
   color: string;
   memberNames: string[];
+  /** 端末内に保存されたカバー画像のfile:// URI。未設定ならテーマカラーの色丸を表示する */
+  coverImageUri?: string;
 }
 
 interface BaseEvent {

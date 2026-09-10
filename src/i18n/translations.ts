@@ -666,6 +666,7 @@ export type TranslationKey =
   | "eventDetail.unsupportedRecurringCalendarMoveMessage"
   | "eventDetail.migrationPendingRetryMessage"
   | "eventDetail.migrationConflictMessage"
+  | "eventDetail.attachmentSourceNotStableMessage"
   // P0078 DATA-F014-001: 共有カレンダー内の通常予定編集CAS保存の非committed結果。
   | "eventDetail.editConflictTitle"
   | "eventDetail.editConflictMessage"
@@ -849,7 +850,48 @@ export type TranslationKey =
   // notFound.*（UX-F005-004: 不正・未一致のDeep Link等、Expo Routerが未一致ルートに使うアプリ独自の画面）
   | "notFound.title"
   | "notFound.message"
-  | "notFound.homeButton";
+  | "notFound.homeButton"
+  // imageUploadService.*
+  | "imageUploadService.notConfigured"
+  | "imageUploadService.uploadFailed"
+  | "imageUploadService.uploadFailedNetwork"
+  | "imageUploadService.avatarSaveFailed"
+  | "imageUploadService.coverSaveFailed"
+  | "imageUploadService.staleCompensationFailed"
+  // attachments.*
+  | "attachments.sectionLabel"
+  | "attachments.countFraction"
+  | "attachments.addButton"
+  | "attachments.addButtonA11y"
+  | "attachments.thumbnailA11y"
+  | "attachments.deleteButtonA11y"
+  | "attachments.retryButtonA11y"
+  | "attachments.previewCloseA11y"
+  | "attachments.deleteConfirmTitle"
+  | "attachments.deleteConfirmMessage"
+  | "attachments.errorPermissionDenied"
+  | "attachments.errorUnsupportedFormat"
+  | "attachments.errorDecodeFailed"
+  | "attachments.errorTooLarge"
+  | "attachments.errorEventLimitFree"
+  | "attachments.errorEventLimitPremium"
+  | "attachments.errorTotalQuotaLocalFree"
+  | "attachments.errorTotalQuotaLocalPremium"
+  | "attachments.errorTotalQuotaCloudFree"
+  | "attachments.errorTotalQuotaCloudPremium"
+  | "attachments.errorOffline"
+  | "attachments.errorUploadFailed"
+  | "attachments.errorSaveFailed"
+  | "attachments.errorDeleteFailed"
+  | "attachments.errorLoadFailed"
+  | "attachments.pendingBadge"
+  | "attachments.eventSaveFailedTitle"
+  | "attachments.eventSaveFailedMessage"
+  | "attachments.commitPartialFailTitle"
+  | "attachments.commitPartialFailMessage"
+  | "calendarSettings.coverUploadFailedTitle"
+  | "calendarSettings.coverChangeA11y"
+  | "calendarSettings.coverRemoveButton";
 
 const translations: Record<SupportedLocale, Record<TranslationKey, string>> = {
   ja: {
@@ -1478,6 +1520,8 @@ const translations: Record<SupportedLocale, Record<TranslationKey, string>> = {
       "予定の移動を処理しています。この状態は確認・再試行が必要です。しばらくしてからもう一度お試しください。",
     "eventDetail.migrationConflictMessage":
       "他の場所で予定が変更されたため、この移動を完了できませんでした。最新の内容を確認してからやり直してください。",
+    "eventDetail.attachmentSourceNotStableMessage":
+      "添付のアップロードまたは削除処理が完了してから、予定表の移動をもう一度お試しください。",
     "eventDetail.editConflictTitle": "他の変更と競合しました",
     "eventDetail.editConflictMessage":
       "この予定はあなたが開いた後に他の人が先に保存しました。入力内容はそのまま残っていますので、最新の内容を確認してからもう一度保存してください。",
@@ -1659,6 +1703,48 @@ const translations: Record<SupportedLocale, Record<TranslationKey, string>> = {
     "notFound.title": "ページが見つかりません",
     "notFound.message": "お探しのページは移動または削除された可能性があります。",
     "notFound.homeButton": "ホームに戻る",
+    "imageUploadService.notConfigured": "Supabase未設定のため、画像を保存できません",
+    "imageUploadService.uploadFailed": "画像をアップロードできませんでした",
+    "imageUploadService.uploadFailedNetwork":
+      "画像をアップロードできませんでした。通信環境をご確認のうえ、もう一度お試しください",
+    "imageUploadService.avatarSaveFailed": "プロフィール画像を保存できませんでした",
+    "imageUploadService.coverSaveFailed": "カバー画像を保存できませんでした",
+    "imageUploadService.staleCompensationFailed":
+      "ログイン中のアカウントが処理中に切り替わったため中断しましたが、アップロード済みの画像の後始末に失敗しました。お手数ですが時間を置いてもう一度お試しください",
+    "attachments.sectionLabel": "添付画像",
+    "attachments.countFraction": "{current} / {max}",
+    "attachments.addButton": "＋ 画像を追加",
+    "attachments.addButtonA11y": "画像を追加",
+    "attachments.thumbnailA11y": "添付画像{index}",
+    "attachments.deleteButtonA11y": "画像を削除",
+    "attachments.retryButtonA11y": "再試行",
+    "attachments.previewCloseA11y": "閉じる",
+    "attachments.deleteConfirmTitle": "画像を削除",
+    "attachments.deleteConfirmMessage": "この画像を削除しますか？",
+    "attachments.errorPermissionDenied": "写真ライブラリへのアクセスが許可されていません。",
+    "attachments.errorUnsupportedFormat": "この画像形式には対応していません。",
+    "attachments.errorDecodeFailed": "画像を読み込めません。",
+    "attachments.errorTooLarge": "画像を{mb}MB以下に圧縮できませんでした。別の画像を選択してください。",
+    "attachments.errorEventLimitFree": "無料プランでは、1つの予定に画像を1枚まで添付できます。",
+    "attachments.errorEventLimitPremium": "1つの予定に添付できる画像は5枚までです。",
+    "attachments.errorTotalQuotaLocalFree": "この端末に保存できる画像容量50MBに達しました。不要な画像を削除してください。",
+    "attachments.errorTotalQuotaLocalPremium": "この端末に保存できる画像容量1GBに達しました。不要な画像を削除してください。",
+    "attachments.errorTotalQuotaCloudFree": "共有カレンダーの画像保存容量20MBに達しました。不要な画像を削除してください。",
+    "attachments.errorTotalQuotaCloudPremium": "共有カレンダーの画像保存容量200MBに達しました。不要な画像を削除してください。",
+    "attachments.errorOffline": "画像の追加にはインターネット接続が必要です。",
+    "attachments.errorUploadFailed": "アップロードに失敗しました。",
+    "attachments.errorSaveFailed": "保存に失敗しました。",
+    "attachments.errorDeleteFailed": "削除に失敗しました。",
+    "attachments.errorLoadFailed": "画像を読み込めませんでした。",
+    "attachments.pendingBadge": "未保存",
+    "attachments.eventSaveFailedTitle": "保存できませんでした",
+    "attachments.eventSaveFailedMessage": "予定を保存できませんでした。添付画像はまだアップロードされていません。",
+    "attachments.commitPartialFailTitle": "一部の画像を保存できませんでした",
+    "attachments.commitPartialFailMessage":
+      "予定は保存されましたが、画像{count}枚の保存に失敗しました。再試行するか削除してください。",
+    "calendarSettings.coverUploadFailedTitle": "カバー画像を変更できませんでした",
+    "calendarSettings.coverChangeA11y": "カバー画像を変更",
+    "calendarSettings.coverRemoveButton": "画像を削除",
   },
   en: {
     "ai.header": "AI Assist",
@@ -2289,6 +2375,8 @@ const translations: Record<SupportedLocale, Record<TranslationKey, string>> = {
       "Your event move is still being processed and needs to be confirmed or retried. Please try again in a little while.",
     "eventDetail.migrationConflictMessage":
       "This move couldn't be completed because the event changed somewhere else. Please check the latest version and try again.",
+    "eventDetail.attachmentSourceNotStableMessage":
+      "Please wait for the attachment upload or deletion to finish, then try moving the calendar again.",
     "eventDetail.editConflictTitle": "Conflicts with another change",
     "eventDetail.editConflictMessage":
       "This event was already saved elsewhere after you opened it. Your input here has been kept — please check the latest version before saving again.",
@@ -2471,6 +2559,53 @@ const translations: Record<SupportedLocale, Record<TranslationKey, string>> = {
     "notFound.title": "Page not found",
     "notFound.message": "The page you're looking for may have been moved or removed.",
     "notFound.homeButton": "Go to home",
+    "imageUploadService.notConfigured": "Can't save the image because Supabase isn't configured",
+    "imageUploadService.uploadFailed": "Couldn't upload the image",
+    "imageUploadService.uploadFailedNetwork":
+      "Couldn't upload the image. Please check your connection and try again",
+    "imageUploadService.avatarSaveFailed": "Couldn't save the profile image",
+    "imageUploadService.coverSaveFailed": "Couldn't save the cover image",
+    "imageUploadService.staleCompensationFailed":
+      "Stopped because the signed-in account changed while this was in progress, but cleaning up the uploaded image failed. Please try again later",
+    "attachments.sectionLabel": "Attachments",
+    "attachments.countFraction": "{current} / {max}",
+    "attachments.addButton": "Add image",
+    "attachments.addButtonA11y": "Add image",
+    "attachments.thumbnailA11y": "Attached image {index}",
+    "attachments.deleteButtonA11y": "Delete image",
+    "attachments.retryButtonA11y": "Retry",
+    "attachments.previewCloseA11y": "Close",
+    "attachments.deleteConfirmTitle": "Delete image",
+    "attachments.deleteConfirmMessage": "Delete this image?",
+    "attachments.errorPermissionDenied": "Photo library access is not granted.",
+    "attachments.errorUnsupportedFormat": "This image format is not supported.",
+    "attachments.errorDecodeFailed": "Couldn't load the image.",
+    "attachments.errorTooLarge": "Couldn't compress the image below {mb}MB. Please choose a different image.",
+    "attachments.errorEventLimitFree": "Free plan events can have up to 1 attached image.",
+    "attachments.errorEventLimitPremium": "An event can have up to 5 attached images.",
+    "attachments.errorTotalQuotaLocalFree":
+      "You've reached this device's 50MB image storage limit. Delete some images to free up space.",
+    "attachments.errorTotalQuotaLocalPremium":
+      "You've reached this device's 1GB image storage limit. Delete some images to free up space.",
+    "attachments.errorTotalQuotaCloudFree":
+      "You've reached the shared calendar's 20MB image storage limit. Delete some images to free up space.",
+    "attachments.errorTotalQuotaCloudPremium":
+      "You've reached the shared calendar's 200MB image storage limit. Delete some images to free up space.",
+    "attachments.errorOffline": "An internet connection is required to add images.",
+    "attachments.errorUploadFailed": "Upload failed.",
+    "attachments.errorSaveFailed": "Failed to save.",
+    "attachments.errorDeleteFailed": "Failed to delete.",
+    "attachments.errorLoadFailed": "Failed to load the image.",
+    "attachments.pendingBadge": "Pending",
+    "attachments.eventSaveFailedTitle": "Couldn't save",
+    "attachments.eventSaveFailedMessage":
+      "Couldn't save the event. Attached images have not been uploaded yet.",
+    "attachments.commitPartialFailTitle": "Some images couldn't be saved",
+    "attachments.commitPartialFailMessage":
+      "The event was saved, but {count} image(s) failed to save. Retry or remove them.",
+    "calendarSettings.coverUploadFailedTitle": "Couldn't change the cover image",
+    "calendarSettings.coverChangeA11y": "Change cover image",
+    "calendarSettings.coverRemoveButton": "Remove image",
   },
 };
 

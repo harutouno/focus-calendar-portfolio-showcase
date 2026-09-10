@@ -63,6 +63,25 @@ export const STORAGE_KEYS = {
    * 新形式へ移行し、パスを確定できないものは`legacy-delete-unresolved`として隔離する
    * （同じキーのまま内部形式だけ段階移行するため、キー名自体は変更しない）。
    */
+  pendingAttachmentStorageCleanup: "@focus_calendar/pending_attachment_storage_cleanup_v1",
+  /**
+   * 端末内予定（ローカルカレンダー）に添付された画像のメタデータ一覧。
+   * 実ファイルは expo-file-system 経由でアプリ専用領域に保存し、ここにはURI等のみ保存する。
+   */
+  eventAttachments: "@focus_calendar/event_attachments_v1",
+  /**
+   * shared calendar A→B の添付付きevent移動（C14 RPC = move_shared_event_and_attachments）を
+   * 跨ぐdurable operation記録。plan作成からdestination staging・RPC実行・reconciliation・
+   * source cleanupまでの全工程を、プロセス終了・再起動をまたいでも再開できるよう、
+   * 副作用（Storage upload/delete・RPC呼出し）を開始する前に必ずこのキーへ永続化する。
+   * `pendingAttachmentStorageCleanup`（通常のcreate/remove用intent）とは別スキーマ（別の状態機械・別のkey）。
+   */
+  attachmentMigration: "@focus_calendar/attachment_migration_v1",
+  /**
+   * 開発専用のプレミアム状態切替値。正式な課金機能は未実装のため、__DEV__時のみ
+   * remotePremiumService.tsが参照する（本番ビルドではこの値を一切見ない）。
+   */
+  devPremiumOverride: "@focus_calendar/dev_premium_override_v1",
   /**
    * P0016 Batch1.3: shared calendar IDを含みうる端末内設定（overlay/favorite/last-used）の
    * owner-bound書込みが、write成功後・identity再確認前後で中断（プロセス終了・repair write

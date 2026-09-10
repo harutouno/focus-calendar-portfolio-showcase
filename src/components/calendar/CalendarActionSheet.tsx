@@ -3,6 +3,8 @@ import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { FieldRow } from "@/components/forms/FieldRow";
 import { TextEditModal } from "@/components/forms/TextEditModal";
 import { useAppData } from "@/context/AppDataContext";
+import { useImagePicker } from "@/hooks/useImagePicker";
+import { deleteLocalCalendarCoverImage, saveLocalCalendarCoverImage } from "@/services/localImageStorage";
 import { isBaseCalendar } from "@/constants/calendarLimits";
 import { CALENDAR_COLOR_PALETTE } from "@/constants/options";
 import { toFriendlyMessage } from "@/utils/friendlyError";
@@ -19,13 +21,16 @@ interface Props {
 }
 
 /**
+ * マイカレンダー画面の3点メニュー（名前を編集／画像を設定・変更／テーマカラーを変更／削除）。
  * 新しい保存経路は作らず、既存のAppDataContext（updateUserCalendar/removeUserCalendar）・
+ * useImagePicker・localImageStorageをそのまま呼び出すだけにする
  * （app/calendar/[id]/settings.tsxの各handlerと同じロジックをこのシート用に薄く再構成したもの）。
  * 基本カレンダー（自分一人用）では削除行を表示しない。
  */
 export function CalendarActionSheet({ calendarId, onClose }: Props) {
   const { t } = useLocale();
   const { userCalendars, updateUserCalendar, removeUserCalendar } = useAppData();
+  const { pickImage } = useImagePicker();
   const [nameModalVisible, setNameModalVisible] = useState(false);
   const [colorEditorOpen, setColorEditorOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -72,8 +77,71 @@ export function CalendarActionSheet({ calendarId, onClose }: Props) {
     }
   };
 
+  const pickAndSaveImage = async () => {
+    if (!calendar || busy) return;
+    const picked = await pickImage({ aspect: [1, 1] });
+    if (!picked) return; // キャンセル・権限拒否時は何も変更しない
+    setBusy(true);
+    const previousUri = calendar.coverImageUri;
+    try {
+      // 安全な更新順序: 新画像を保存→カレンダーデータを更新→更新成功後にだけ旧画像を削除する。
+      // 新画像の保存に失敗した場合はここで例外が飛び、旧画像・旧データは一切触れない。
+      const savedUri = await saveLocalCalendarCoverImage(calendar.id, picked.uri);
+      try {
+        await updateUserCalendar({ ...calendar, coverImageUri: savedUri });
+      } catch (e) {
+        // カレンダーデータの更新に失敗した場合は、今保存した新画像を掃除して整合性を保つ。
+        await deleteLocalCalendarCoverImage(savedUri).catch(() => {});
+        throw e;
+      }
+      // 更新成功後にだけ旧画像を削除する（削除に失敗しても新画像の設定自体は取り消さない）。
+      if (previousUri) {
+        deleteLocalCalendarCoverImage(previousUri).catch(() => {});
+      }
+    } catch (e) {
+      Alert.alert(
+        t("calendarSettings.coverUploadFailedTitle"),
+        toFriendlyMessage(e instanceof Error ? e.message : undefined, t("calendarSettings.coverUploadFailedTitle"), t)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
+  const revertToDefaultImage = async () => {
+    if (!calendar || busy) return;
+    setBusy(true);
+    const previousUri = calendar.coverImageUri;
+    try {
+      // 先にカレンダーデータを更新し、成功したあとにだけ画像ファイルを削除する
+      // （データ更新に失敗した場合はファイルを残し、表示との不整合を防ぐ）。
+      await updateUserCalendar({ ...calendar, coverImageUri: undefined });
+      if (previousUri) {
+        deleteLocalCalendarCoverImage(previousUri).catch(() => {});
+      }
+    } catch (e) {
+      Alert.alert(
+        t("common.couldNotChange"),
+        toFriendlyMessage(e instanceof Error ? e.message : undefined, t("common.couldNotChange"), t)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
+  const handlePressImageRow = () => {
+    if (!calendar) return;
+    if (!calendar.coverImageUri) {
+      pickAndSaveImage();
+      return;
+    }
+    // 既に画像がある場合だけ、変更／標準表示に戻す／キャンセルの3択を出す。
+    Alert.alert(calendar.name, undefined, [
+      { text: t("calendars.actionChangeImage"), onPress: pickAndSaveImage },
+      { text: t("calendars.actionRevertToDefaultImage"), onPress: revertToDefaultImage, style: "destructive" },
+      { text: t("common.cancel"), style: "cancel" },
+    ]);
+  };
 
   const handleDelete = () => {
     if (!calendar) return;
@@ -114,6 +182,12 @@ export function CalendarActionSheet({ calendarId, onClose }: Props) {
               icon="pencil-outline"
               label={t("calendars.actionRename")}
               onPress={() => setNameModalVisible(true)}
+              showChevron={false}
+            />
+            <FieldRow
+              icon="image-outline"
+              label={t("calendars.actionChangeImage")}
+              onPress={handlePressImageRow}
               showChevron={false}
             />
             <FieldRow

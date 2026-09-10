@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Pressable, ScrollView, Share, StyleSheet, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, Share, StyleSheet, Switch, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -11,19 +11,24 @@ import { FieldRow } from "@/components/forms/FieldRow";
 import { TextEditModal } from "@/components/forms/TextEditModal";
 import { PickerModal, PickerOption } from "@/components/forms/PickerModal";
 import { Avatar } from "@/components/common/Avatar";
-import { DefaultCalendarCover } from "@/components/calendar/DefaultCalendarCover";
+import { CoverImage } from "@/components/calendar/CoverImage";
 import { useAppData } from "@/context/AppDataContext";
 import { useAuth } from "@/context/AuthContext";
+import { useImagePicker } from "@/hooks/useImagePicker";
 import {
   createInvite,
   fetchCalendarMembers,
   fetchInvites,
   fetchSharedCalendarMemberLimitStatus,
+  removeCalendarCoverImage,
   leaveSharedCalendar,
   removeMember,
   revokeInvite,
   updateMemberRole,
 } from "@/services/calendarService";
+import { deleteCalendarCoverStorageObject, uploadCalendarCoverImage } from "@/services/imageUploadService";
+import { deleteLocalCalendarCoverImage, saveLocalCalendarCoverImage } from "@/services/localImageStorage";
+import { useSignedCoverUrl } from "@/hooks/useSignedCoverUrl";
 import {
   SharedMutationIdentity,
   buildIdentityRemountKey,
@@ -58,6 +63,7 @@ const ROLE_LABEL_KEY: Record<CalendarRole, TranslationKey> = {
 };
 
 /**
+ * カレンダー設定画面。名前・色・カバー画像・メンバー・招待・削除／退出を1画面に整理する。
  * メンバー・招待の詳細な管理は既存の members.tsx / invite.tsx への導線として維持し、
  * ここではそれぞれの既存サービス関数（updateMemberRole/removeMember/createInvite/revokeInvite等）
  * を直接呼び出す（ロジックの重複実装は行わない）。
@@ -92,6 +98,7 @@ function CalendarSettingsScreenInner() {
     refreshShared,
   } = useAppData();
   const { user, sessionInstanceId } = useAuth();
+  const { pickImage } = useImagePicker();
 
   // REVISE対応（第9ラウンド、P1-2）: 共有mutation系サービス関数へ渡すSharedMutationIdentityを
   // ここで一元的に組み立てる。認証セッション情報が確認できない場合は例外を投げ、呼び出し元の
@@ -136,6 +143,7 @@ function CalendarSettingsScreenInner() {
   const [saving, setSaving] = useState(false);
   const [members, setMembers] = useState<CalendarMembership[]>([]);
   const [memberLimitStatus, setMemberLimitStatus] = useState<SharedCalendarMemberLimitStatus | null>(null);
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [editingMember, setEditingMember] = useState<CalendarMembership | null>(null);
   /**
    * P0180 / CORRECT-F024-003-D: 生 token だけでなく **inviteId + scope に束縛した資格**を持つ。
@@ -177,8 +185,14 @@ function CalendarSettingsScreenInner() {
 
   const isOwner = sharedSummary?.role === "owner";
   const canEdit = !sharedSummary || isOwner;
+  // 共有カレンダー画像は、予定に対する編集権限とは別にオーナーのみ変更可（private Storage
+  // RLS・update_calendar_cover RPCの権限と一致させる）。ローカルカレンダーは常に端末の
   // 所有者本人が操作しているため、常に変更可。
+  const canChangeCover = sharedSummary ? isOwner : !!localCalendar;
+  const rawCoverValue = sharedSummary?.calendar.coverImageUrl ?? localCalendar?.coverImageUri;
+  // 共有カレンダーの値（旧公開URL・新形式Storageパスいずれも）は署名付きURLへ解決する。
   // ローカルカレンダーのfile://はこのHookの中でそのまま素通しされる（一切変化しない）。
+  const coverImageUri = useSignedCoverUrl(rawCoverValue);
 
   // REVISE対応（第10ラウンド、P1-2）: fetchInvites/fetchCalendarMembers/
   // fetchSharedCalendarMemberLimitStatusへSharedMutationIdentityを渡す。同一identityのまま
@@ -379,10 +393,138 @@ function CalendarSettingsScreenInner() {
     }
   };
 
+  // REVISE対応（第10ラウンド、P1-3）: 共有カレンダー分岐は、uploadCalendarCoverImage
+  // 呼出し後のresult.error判定・refreshShared・旧画像削除まで含めて1つのidentity-scoped
+  // 操作として扱う。identityが処理中に切り替わった場合、失敗Alertも旧画像削除も行わず、
+  // 外側のcatchでstale専用のエラーとして扱われる（P1-4でuploadCalendarCoverImage自体に
   // identity契約が入るまでは、この画面側の後続副作用だけを保護する）。ローカルカレンダー分岐は
   // auth identityに一切依存しないため変更しない。
+  const handleChangeCover = async () => {
+    if (!canChangeCover || uploadingCover) return;
+    // P0015 Batch1.2、P1-2: shared分岐は、OS画像pickerを開くという副作用より前に
+    // current identityを確認する（stale A screenからB切替後にpickerを開かせない）。
+    let identity: SharedMutationIdentity | null = null;
+    if (sharedSummary) {
+      try {
+        identity = requireIdentity();
+      } catch {
+        return;
+      }
+      if (!isCurrentSharedMutationIdentity(identity)) return;
+    }
+    // ローカル（マイカレンダー）の表示は正方形想定のため[1,1]、共有カレンダーは
+    // 従来どおり横長[16,9]のままにする。
+    const picked = await pickImage({ aspect: localCalendar ? [1, 1] : [16, 9] });
+    if (!picked) return; // キャンセル・権限拒否時は何も変更しない
+    // pickerを操作している間にstale化した場合も、setUploadingCover(true)より前に検知する。
+    if (identity && !isCurrentSharedMutationIdentity(identity)) return;
+    setUploadingCover(true);
+    try {
+      if (sharedSummary) {
+        await runCurrentSharedMutation(identity!, async (assertCurrent) => {
+          // 安全な更新順序: 新画像を保存＋DB更新（uploadCalendarCoverImage内部で一括実施）
+          // →refreshShared成功後にだけ旧画像をStorageから削除する。
+          const previousUrl = sharedSummary.calendar.coverImageUrl;
+          const result = await uploadCalendarCoverImage(sharedSummary.calendar.id, picked.uri, identity!, t);
+          assertCurrent();
+          if (result.error) {
+            Alert.alert(t("calendarSettings.coverUploadFailedTitle"), result.error);
+            return; // 既存の画像はrefreshShared()を呼ばないため変更されない
+          }
+          await refreshShared();
+          assertCurrent();
+          if (previousUrl) {
+            // P0154 (SEC-AUTH-TRANSPORT-001): 旧カバーの後始末も owner 証明が要る。
+            // `identity` は上の `uploadCalendarCoverImage` 呼び出し時点で non-null が
+            // 保証されているが、ここで改めて明示的に確認する（null なら削除せず
+            // orphan を残す＝別アカウントの認可で消しに行かない）。
+            if (identity) {
+              deleteCalendarCoverStorageObject(
+                sharedSummary.calendar.id,
+                previousUrl,
+                identity
+              ).catch(() => {});
+            }
+          }
+        });
+      } else if (localCalendar) {
+        // 安全な更新順序: 新画像を保存→カレンダーデータを更新→更新成功後にだけ旧画像を削除する。
+        // 新画像の保存自体に失敗した場合はここで例外が飛び、旧画像・旧データには触れない。
+        const previousUri = localCalendar.coverImageUri;
+        const savedUri = await saveLocalCalendarCoverImage(localCalendar.id, picked.uri);
+        try {
+          await updateUserCalendar({ ...localCalendar, coverImageUri: savedUri });
+        } catch (e) {
+          // カレンダーデータの更新に失敗した場合は、今保存した新画像を掃除して整合性を保つ。
+          await deleteLocalCalendarCoverImage(savedUri).catch(() => {});
+          throw e;
+        }
+        // 更新成功後にだけ旧画像を削除する（削除に失敗しても新画像の設定自体は取り消さない）。
+        if (previousUri) {
+          deleteLocalCalendarCoverImage(previousUri).catch(() => {});
+        }
+      }
+    } catch (e) {
+      if (!identity || isCurrentSharedMutationIdentity(identity)) {
+        Alert.alert(
+          t("calendarSettings.coverUploadFailedTitle"),
+          toFriendlyMessage(e instanceof Error ? e.message : undefined, t("calendarSettings.coverUploadFailedTitle"), t)
+        );
+      }
+    } finally {
+      if (!identity || isCurrentSharedMutationIdentity(identity)) {
+        setUploadingCover(false);
+      }
+    }
+  };
 
+  // REVISE対応（第10ラウンド、P1-3）: removeCalendarCoverImage呼出しとその後のrefreshShared
   // まで含めて1つのidentity-scoped操作として扱う。
+  const handleRemoveCover = async () => {
+    if (!canChangeCover || uploadingCover) return;
+    // P0015 Batch1.2、P1-2: shared分岐は、setUploadingCover(true)という副作用より前に
+    // current identityを確認する。
+    let identity: SharedMutationIdentity | null = null;
+    if (sharedSummary) {
+      try {
+        identity = requireIdentity();
+      } catch {
+        return;
+      }
+      if (!isCurrentSharedMutationIdentity(identity)) return;
+    }
+    setUploadingCover(true);
+    try {
+      if (sharedSummary) {
+        await runCurrentSharedMutation(identity!, async (assertCurrent) => {
+          // removeCalendarCoverImage内部で「DB更新→成功後にStorage削除」の順序を保証している。
+          await removeCalendarCoverImage(
+            sharedSummary.calendar.id,
+            sharedSummary.calendar.coverImageUrl,
+            identity!
+          );
+          assertCurrent();
+          await refreshShared();
+        });
+      } else if (localCalendar) {
+        // 先にカレンダーデータを更新し、成功したあとにだけ画像ファイルを削除する
+        // （データ更新に失敗した場合はファイルを残し、表示との不整合を防ぐ）。
+        const previousUri = localCalendar.coverImageUri;
+        await updateUserCalendar({ ...localCalendar, coverImageUri: undefined });
+        if (previousUri) {
+          deleteLocalCalendarCoverImage(previousUri).catch(() => {});
+        }
+      }
+    } catch (e) {
+      if (!identity || isCurrentSharedMutationIdentity(identity)) {
+        Alert.alert(t("common.couldNotChange"), toFriendlyMessage(e instanceof Error ? e.message : undefined, t("common.couldNotChange"), t));
+      }
+    } finally {
+      if (!identity || isCurrentSharedMutationIdentity(identity)) {
+        setUploadingCover(false);
+      }
+    }
+  };
 
   // REVISE対応（第10ラウンド、P1-3）: updateMemberRole/removeMemberの呼出しと、その後の
   // 再取得（loadMembers/loadMemberLimitStatus）まで含めて1つのidentity-scoped操作として扱う。
@@ -770,13 +912,37 @@ function CalendarSettingsScreenInner() {
       <ScreenHeader title={t("calendarSettings.title")} onBack={() => router.back()} />
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.coverPreview}>
-          <DefaultCalendarCover
+          <CoverImage
+            uri={coverImageUri}
             color={color}
             icon={sharedSummary ? "people-outline" : "person-outline"}
             iconSize={36}
             style={StyleSheet.absoluteFillObject}
           />
+          {canChangeCover && (
+            <Pressable
+              style={styles.coverChangeButton}
+              onPress={handleChangeCover}
+              disabled={uploadingCover}
+              accessibilityLabel={t("calendarSettings.coverChangeA11y")}
+            >
+              {uploadingCover ? (
+                <ActivityIndicator size="small" color={colors.textInverse} />
+              ) : (
+                <Ionicons name="camera" size={18} color={colors.textInverse} />
+              )}
+            </Pressable>
+          )}
         </View>
+        {canChangeCover && coverImageUri && (
+          <Pressable
+            style={styles.coverRemoveButton}
+            onPress={handleRemoveCover}
+            disabled={uploadingCover}
+          >
+            <Text style={styles.coverRemoveButtonText}>{t("calendarSettings.coverRemoveButton")}</Text>
+          </Pressable>
+        )}
         <Text style={styles.identityName} numberOfLines={1}>{name}</Text>
         <Text style={styles.identitySub}>
           {sharedSummary
@@ -1036,6 +1202,26 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     borderRadius: 16,
     overflow: "hidden",
+  },
+  coverChangeButton: {
+    position: "absolute",
+    right: spacing.sm,
+    bottom: spacing.sm,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(17,20,27,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  coverRemoveButton: {
+    alignSelf: "center",
+    marginTop: spacing.xs,
+  },
+  coverRemoveButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: colors.warning,
   },
   identityName: { fontSize: 18, fontWeight: "700", color: colors.textPrimary, marginTop: spacing.md, marginHorizontal: spacing.lg },
   identitySub: { fontSize: 12, color: colors.textTertiary, marginTop: 2, marginHorizontal: spacing.lg, marginBottom: spacing.sm },

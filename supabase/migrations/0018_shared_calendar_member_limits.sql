@@ -1,6 +1,8 @@
 -- 単独修正(2026-08): FP-008「共有カレンダーのメンバー数上限を正式決定し、サーバー側で強制する」。
 --
+-- 正式決定（docs/free-premium-spec.md §4.4参照）:
 --   * 無料所有者のカレンダー: 所有者を含めて最大5人
+--   * プレミアム所有者のカレンダー: 所有者を含めて最大20人
 --   * 適用されるプランは「操作している本人」ではなく「カレンダー所有者」のプラン
 --   * 数える対象: 所有者(1人、calendar_membersのowner行の有無に関わらず常に1人として数える)
 --     + editor/viewerとして参加済みのcalendar_members行 + まだ有効な承認待ちcalendar_invites行
@@ -36,6 +38,7 @@
 --     本migrationでは対象カレンダーのメンバー枠を扱うため、ロックキーはowner_idではなく
 --     calendar_id単位にする（招待発行・招待承認・直接INSERTのすべてで同じ
 --     hashtext(calendar_id::text)を使い、ロック順序を単一に保ってデッドロックを避ける）。
+--   * is_premium_active_for(p_user_id)（0016で追加済み）をそのまま再利用する
 --     （呼び出し本人ではなく指定した所有者のプランを判定する内部専用関数、
 --     一般ロールへは一切grantされていない）。
 --
@@ -43,7 +46,8 @@
 -- 同時表示5個、owner/editor/viewerの既存権限、owner_id変更禁止（0016）、
 -- 画像上限（0017）、AI・広告・集中分析・CSV・購入処理。0001〜0017は無編集。
 --
--- 適用順: 0012 → 0013 → 0014 → 0015 → 0016 → 0017 → 0018。
+-- 適用順: 0012 → 0013 → 0014 → 0015 → 0016 → 0017 → 0018。0018はai_usage_*・
+-- event_attachments*のいずれにも触れないため、Edge Function再デプロイは不要。
 -- このファイルは作成のみで、実環境へは適用しない（レビュー後にユーザー自身が実行する）。
 
 -- ============================================================
@@ -58,7 +62,7 @@ create index if not exists calendar_invites_calendar_id_idx
 -- ============================================================
 -- 2. resolve_shared_calendar_member_limit(p_owner_id): 所有者プランからメンバー上限を決定
 -- ============================================================
--- 内部専用（authenticatedへgrantしない）。この関数自体が
+-- 内部専用（authenticatedへgrantしない）。is_premium_active_for自体が
 -- 0016でrevoke all on ... from publicのみ（grant無し）だが、SECURITY DEFINER関数同士の
 -- 内部呼び出しには影響しない（0017のresolve_owner_plan等と同じ既存の前例）。
 create or replace function public.resolve_shared_calendar_member_limit(p_owner_id uuid)
@@ -68,7 +72,7 @@ stable
 security definer
 set search_path = public, pg_temp
 as $$
-  select 5;
+  select case when public.is_premium_active_for(p_owner_id) then 20 else 5 end;
 $$;
 
 revoke all on function public.resolve_shared_calendar_member_limit(uuid) from public;
@@ -218,7 +222,7 @@ begin
     raise exception 'shared_calendar_member_limit_exceeded';
   end if;
 
-  v_token := translate(encode(gen_random_bytes(24), 'base64'), '+/=', '-_');
+  v_token := encode(gen_random_bytes(24), 'base64url');
   v_expires := now() + make_interval(hours => p_expires_in_hours);
 
   insert into public.calendar_invites (calendar_id, role, token_hash, created_by, expires_at, invitee_email)
@@ -355,7 +359,7 @@ grant execute on function public.accept_calendar_invite_by_id(uuid) to authentic
 -- ============================================================
 -- クライアント（settings.tsx/invite.tsx）が「現在何人使っているか・上限は何人か・
 -- あと何人招待できるか・上限に達しているか」を、所有者の資格詳細を一切見せずに
--- 取得するためのRPC。カレンダーの存在有無をメンバー外へ漏らさない設計方針:
+-- 取得するためのRPC。get_attachment_quota_status（0017）と同じ設計方針:
 -- 呼び出し本人がそのカレンダーのメンバーでない場合はcalendar_not_found例外にする
 -- （メンバー外であることと存在しないことを区別しない＝アクセス可否の情報を漏らさない）。
 -- current_member_count/active_invite_countはused_slot_count
@@ -419,8 +423,10 @@ grant execute on function public.get_shared_calendar_member_limit_status(uuid) t
 -- ============================================================
 -- verify（適用後に手動で確認する。実行順序・UUIDは環境に合わせて置き換えること）
 -- ============================================================
+-- verify (無料所有者のカレンダーで上限5・プレミアム所有者のカレンダーで上限20が
 -- 返ることの確認):
--- select public.resolve_shared_calendar_member_limit('<any-owner-uuid>');  -- 常に 5
+-- select public.resolve_shared_calendar_member_limit('<free-owner-uuid>');    -- 5を期待
+-- select public.resolve_shared_calendar_member_limit('<premium-owner-uuid>'); -- 20を期待
 --
 -- verify (無料所有者のカレンダーで、所有者1人のみの状態からeditor/viewerを4人追加できる
 -- ことの確認。5人目（合計6人目）の直接INSERTがshared_calendar_member_limit_exceededで

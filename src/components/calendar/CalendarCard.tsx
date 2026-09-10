@@ -1,9 +1,10 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { DefaultCalendarCover } from "./DefaultCalendarCover";
+import { CoverImage } from "./CoverImage";
 import { Avatar } from "@/components/common/Avatar";
 import { MemberPreview } from "@/types/sharing";
+import { useSignedCoverUrl } from "@/hooks/useSignedCoverUrl";
 import { colors } from "@/theme/colors";
 import { minTapSize, spacing } from "@/theme/spacing";
 import { useLocale } from "@/context/LocaleContext";
@@ -13,6 +14,7 @@ const MAX_CARD_AVATARS = 3;
 interface Props {
   name: string;
   color: string;
+  coverImageUrl?: string;
   icon: keyof typeof Ionicons.glyphMap;
   /** カレンダーの種別・役割を表す1行（例: "端末内"、"オーナー・参加者4人"、"招待リンクを管理"） */
   statusText: string;
@@ -34,6 +36,7 @@ interface Props {
 export function CalendarCard({
   name,
   color,
+  coverImageUrl,
   icon,
   statusText,
   memberPreviews,
@@ -45,6 +48,7 @@ export function CalendarCard({
   chevronOnly,
 }: Props) {
   const { t } = useLocale();
+  const coverUri = useSignedCoverUrl(coverImageUrl);
   return (
     <Pressable
       style={styles.card}
@@ -53,7 +57,7 @@ export function CalendarCard({
       accessibilityLabel={accessibilityLabel}
     >
       <View style={styles.cover}>
-        <DefaultCalendarCover color={color} icon={icon} iconSize={20} />
+        <CoverImage uri={coverUri} color={color} icon={icon} iconSize={20} />
       </View>
       <View style={styles.textCol}>
         <Text style={styles.name} numberOfLines={1}>{name}</Text>

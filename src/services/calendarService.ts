@@ -1,5 +1,6 @@
 import * as Crypto from "expo-crypto";
 import { supabase } from "@/lib/supabaseClient";
+import { deleteCalendarCoverStorageObject } from "@/services/imageUploadService";
 import {
   PendingSharedCalendarCreate,
   clearPendingSharedCalendarCreate,
@@ -61,6 +62,7 @@ interface CalendarRow {
   owner_id: string;
   created_at: string;
   updated_at: string;
+  cover_image_url?: string | null;
 }
 
 interface MemberRow {
@@ -81,6 +83,7 @@ function rowToCalendar(row: CalendarRow): SharedCalendar {
     ownerId: row.owner_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    coverImageUrl: row.cover_image_url ?? undefined,
   };
 }
 
@@ -117,7 +120,7 @@ export async function fetchJoinedCalendars(
   const calendarRows = await awaitCurrentSharedOperation(identity, async () => {
     const { data, error } = await supabase
       .from("calendars")
-      .select("id, name, color, owner_id, created_at, updated_at")
+      .select("id, name, color, owner_id, created_at, updated_at, cover_image_url")
       .in("id", calendarIds);
     if (error) throw error;
     return data;
@@ -285,7 +288,7 @@ export async function reconcileSharedCalendarCreate(
     row = await awaitCurrentSharedOperation(identity, async () => {
       const { data, error } = await supabase
         .from("calendars")
-        .select("id, name, color, owner_id, created_at, updated_at")
+        .select("id, name, color, owner_id, created_at, updated_at, cover_image_url")
         .eq("id", pending.calendarId)
         .maybeSingle();
       if (error) throw error;
@@ -506,7 +509,7 @@ async function runCreateSharedCalendar(
           client
             .from("calendars")
             .insert({ id: calendarId, name, color, owner_id: identity.userId })
-            .select("id, name, color, owner_id, created_at, updated_at")
+            .select("id, name, color, owner_id, created_at, updated_at, cover_image_url")
             .single()
         );
         if (error) throw error;
@@ -632,6 +635,44 @@ export async function updateCalendar(
         ? SHARED_CALENDAR_UPDATE_BLOCKED_MESSAGE
         : SHARED_CALENDAR_UPDATE_UNCONFIRMED_MESSAGE
     );
+  });
+}
+
+/**
+ * 共有カレンダーのカバー画像を削除する（色丸表示へ戻す）。既存のupdate_calendar_cover RPC
+ * （オーナー・編集者のみ実行可、Stage1-C）へnullを渡すだけで、新規のRPC・migrationは不要。
+ *
+ * 保存パスが一意なリビジョンファイル名（`{calendarId}/{revisionId}.jpg`）のため、
+ * DB更新の成功を確認したあとにStorage上の実ファイルも削除する（固定パスへの次回
+ * アップロードでの上書きに任せると、一意パス化のもとでは孤立ファイルが残り続ける）。
+ * 削除対象は引数のcurrentCoverImageUrlそのもの——calendarIdからパスを逆算しない。
+ * 削除に失敗しても例外は投げない（RPC成功＝DB上は既に削除済みのため、Storage側の
+ * 掃除失敗でこの関数全体を失敗扱いにする必要は無いbest-effort処理）。
+ *
+ * SharedMutationIdentityを要求し、RPC呼び出し前・RPC成功後（Storage削除という
+ * 後続副作用を始める前）の両方でidentityを確認する。identityが変化していた場合は
+ * Storage削除も行わない（後続副作用を一切開始しない）。RPC呼出し自体は
+ * `awaitCurrentSharedOperation`へ通す。`deleteCalendarCoverStorageObject`へ
+ * expected calendarIdを渡し、解決したpathがこのcalendarId配下でない限りStorage削除を
+ * 行わないようにする（詳細はimageUploadService.ts/calendarCoverPath.ts参照）。
+ */
+export async function removeCalendarCoverImage(
+  calendarId: string,
+  currentCoverImageUrl: string | undefined,
+  identity: SharedMutationIdentity
+): Promise<void> {
+  return runCurrentSharedMutation(identity, async (assertCurrent) => {
+    await awaitCurrentSharedOperation(identity, async () => {
+      const { error } = await withPinnedSharedClient(identity, (client) =>
+        client.rpc("update_calendar_cover", {
+          p_calendar_id: calendarId,
+          p_cover_image_url: null,
+        })
+      );
+      if (error) throw error;
+    });
+    assertCurrent();
+    await deleteCalendarCoverStorageObject(calendarId, currentCoverImageUrl, identity);
   });
 }
 
@@ -1034,6 +1075,7 @@ interface PendingInviteRow {
   calendar_id: string;
   calendar_name: string;
   calendar_color: string;
+  calendar_cover_image_url: string | null;
   role: Extract<CalendarRole, "editor" | "viewer">;
   created_at: string;
   expires_at: string;
@@ -1061,6 +1103,7 @@ export async function fetchPendingInvitesForCurrentUser(
     calendarId: row.calendar_id,
     calendarName: row.calendar_name,
     calendarColor: row.calendar_color,
+    calendarCoverImageUrl: row.calendar_cover_image_url ?? undefined,
     role: row.role,
     createdAt: row.created_at,
     expiresAt: row.expires_at,

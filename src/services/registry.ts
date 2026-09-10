@@ -8,6 +8,8 @@ import { LocaleService } from "@/services/localeService";
 import { localeService as defaultLocaleService } from "@/services/deviceLocaleService";
 import { HolidayRegionService } from "@/services/holidayRegionService";
 import { holidayRegionService as defaultHolidayRegionService } from "@/services/deviceHolidayRegionService";
+import { PremiumService } from "@/services/premiumService";
+import { premiumService as defaultPremiumService } from "@/services/remotePremiumService";
 
 /**
  * 最小限のサービスレジストリ（DI）。
@@ -27,6 +29,7 @@ export interface ServiceRegistry {
   calendarFacade: CalendarFacade;
   localeService: LocaleService;
   holidayRegionService: HolidayRegionService;
+  premiumService: PremiumService;
 }
 
 /**
@@ -43,6 +46,7 @@ const defaultRegistry: ServiceRegistry = {
   calendarFacade,
   localeService: defaultLocaleService,
   holidayRegionService: defaultHolidayRegionService,
+  premiumService: defaultPremiumService,
 };
 
 let registry: ServiceRegistry = defaultRegistry;

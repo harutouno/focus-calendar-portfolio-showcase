@@ -1,8 +1,9 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { NormalEvent, ShareTarget, UserCalendar } from "@/types/event";
 import { JoinedCalendarSummary, SyncStatus } from "@/types/sharing";
+import { EventAttachment } from "@/types/attachment";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 import { ScreenHeader } from "@/components/common/ScreenHeader";
@@ -22,6 +23,12 @@ import { combineDateAndTime, defaultEndTime } from "@/utils/time";
 import { validateNormalEvent, hasErrors } from "@/utils/validation";
 import { useLocale } from "@/context/LocaleContext";
 import { useAuth } from "@/context/AuthContext";
+import { usePremiumStatus } from "@/hooks/usePremiumStatus";
+import { useEventAttachments, UseEventAttachmentsParams } from "@/hooks/useEventAttachments";
+import { EventAttachmentSection } from "@/components/attachments/EventAttachmentSection";
+import { PremiumStatus } from "@/types/premium";
+import { cloudAttachmentRepository } from "@/services/cloudAttachmentRepository";
+import { localAttachmentRepository } from "@/services/localAttachmentRepository";
 import { toFriendlyMessage } from "@/utils/friendlyError";
 import {
   SharedOperationIdentity,
@@ -59,20 +66,26 @@ interface Props {
   isEditing: boolean;
   /**
    * 新規作成（isEditing=false）では、この関数は予定本体を保存するだけにし、
+   * 画面遷移は行わないこと（NormalEventFormが保存成功→添付コミット完了まで待ってから
    * onSaveCompleteを呼ぶ）。編集（isEditing=true）では従来通り、この中で画面遷移まで
    * 行ってよい（画像は既に即時アップロード方式のため、保存タイミングと無関係）。
    */
   onSave: (value: NormalEventFormValue) => void | Promise<void>;
+  /** 新規作成のみ使用。予定保存＋添付コミット（成功時）が両方完了した後に呼ばれ、画面遷移はここで行う。 */
   onSaveComplete?: () => void;
   onDelete?: () => void | Promise<void>;
   /** 編集中の予定が共有カレンダーに属する場合の送信状態（表示のみ。未指定＝端末内予定、または新規作成で未送信） */
   syncStatus?: SyncStatus;
   /**
+   * 画像添付機能用。新規作成画面は開いた時点で先に確定させた安定したID、
    * 編集画面は既存のevent.idをそのまま渡す。
    */
   eventId: string;
   /**
+   * 新規作成のみ使用。ドラフト添付の保存先を識別する、eventIdとは概念上別のID
+   * （events行が存在しないうちは、この下にのみ画像を保存し、正式な添付として登録しない）。
    */
+  draftSessionId?: string;
 }
 
 type ActiveModal =
@@ -117,6 +130,7 @@ function NormalEventFormInner({
   onDelete,
   syncStatus,
   eventId,
+  draftSessionId,
 }: Props) {
   const { t, locale } = useLocale();
   const { user, sessionInstanceId } = useAuth();
@@ -181,8 +195,10 @@ function NormalEventFormInner({
 
   const isCloudEvent = !!targetSharedCalendar;
   /**
+   * P0040（5節）: 編集中は添付のremote authority（useEventAttachments・表示解決・
    * scope key）をsource calendar（編集開始時点のcalendarId）へ固定する。calendar
    * pickerでvalue.calendarIdが変わっても、保存がコミット（またはC14 migration完了）
+   * するまでこの値は追従しない——添付DB/Storageの正規データは移行前は常にsource側に
    * あるため（5節）。useState初期化子は初回マウント時にしか評価されないため、
    * これ自体がスナップショットとして機能する。新規作成（isEditing=false）は
    * 「source」という概念が無いため対象外——従来通りライブのtargetがそのままplanになる。
@@ -194,6 +210,7 @@ function NormalEventFormInner({
     // P0041（9節）: source domainの共有/端末内判定にrole filterを掛けない。
     // editableSharedCalendars（role!=="viewer"のみ）で判定すると、viewer権限の
     // 共有カレンダーに属する予定へ何らかの経路（他画面・deep link等）で直接編集
+    // 到達した場合、sourceが実際には共有なのに端末内扱いとなり、添付remote
     // authorityがlocal repositoryへfallbackしてしまう。target pickerの選択肢
     // （editableSharedCalendars）とsource domainの判定基準は別物として扱う。
     const isInitialCalendarShared = sharedCalendars.some(
@@ -204,25 +221,31 @@ function NormalEventFormInner({
       isCloudEventSource: isInitialCalendarShared,
     };
   });
-  const sourceIsCloudEvent = editSourceSnapshot
+  const attachmentIsCloudEvent = editSourceSnapshot
     ? editSourceSnapshot.isCloudEventSource
     : isCloudEvent;
+  const attachmentCalendarId = editSourceSnapshot
+    ? editSourceSnapshot.sourceCalendarId
+    : value.calendarId;
   /**
    * P0041（8節）: identity gate（handleSubmitのstale確認）は、target pickerの選択だけで
-   * 決めてはならない。sourceが共有だった場合（sourceIsCloudEvent）、targetが
+   * 決めてはならない。sourceが共有だった場合（attachmentIsCloudEvent）、targetが
    * 端末内カレンダーへ変更されていても、保存はperformSingleEventSave等のC14統合経路を
    * 通り得るため、shared identityの現在性チェックを飛ばしてはならない。isEditing時は
    * 「sourceが共有 OR targetが共有」のいずれかで真になる。create時はsource概念が無く
-   * sourceIsCloudEvent===isCloudEventなので、この式はisCloudEventへ自然に一致する。
+   * attachmentIsCloudEvent===isCloudEventなので、この式はisCloudEventへ自然に一致する。
    */
-  const requiresSharedIdentity = sourceIsCloudEvent || isCloudEvent;
+  const requiresSharedIdentity = attachmentIsCloudEvent || isCloudEvent;
   // Round 12（P1-4/P1-5）: NormalEventFormInnerはidentity変化のたびに完全remountされるため
+  // （outer wrapper参照）、この値はマウント中ずっと不変——useEventAttachments自身も
   // Hook初期化時点でこの値をさらに固定する（identityRef）。
   const userId = user?.id ?? null;
   const identity: SharedOperationIdentity | null = useMemo(
     () => (userId && sessionInstanceId ? { userId, sessionInstanceId } : null),
     [userId, sessionInstanceId]
   );
+  const isPremium = usePremiumStatus();
+  const devicePlan: PremiumStatus = isPremium ? "premium" : "free";
   const [saving, setSaving] = useState(false);
   /**
    * [P0076 QA-F013対応] handleSubmitの二重送信ガード。savingはuseStateのため、
@@ -234,23 +257,58 @@ function NormalEventFormInner({
    */
   const submittingRef = useRef(false);
   // Round13、P1-3: isCloudEventがtrueなのにidentityが欠落している場合（画面remount直前の
+  // 短い遷移window等）、ローカル扱いへフォールバックしない（クラウド予定の添付を端末内
   // ストレージへ書き込んでしまう実害があるため）。identityをそのまま（nullの可能性を含め）
+  // Hookへ渡し、Hook側の"cloud-blocked"状態が添付操作を安全に一時停止する。
+  const attachmentsParams: UseEventAttachmentsParams = attachmentIsCloudEvent
+    ? {
+        mode: isEditing ? "edit" : "create",
+        eventId,
+        draftSessionId,
+        isCloudEvent: true,
+        calendarId: attachmentCalendarId,
+        identity,
+        devicePlan,
+      }
+    : {
+        mode: isEditing ? "edit" : "create",
+        eventId,
+        draftSessionId,
+        isCloudEvent: false,
+        devicePlan,
+      };
+  const attachments = useEventAttachments(attachmentsParams);
 
   // Round14、P1-3: isCloudEvent===trueなのにidentityが無い場合（画面remount直前の短い
+  // 遷移window等）は、端末内repositoryへフォールバックしない（クラウド予定の添付URIを
   // ローカルストレージから解決しようとして誤動作させないため、fail-closed）。
-  // P0040（5節）: sourceIsCloudEventを使う（source固定済み）——targetのisCloudEventではない。
+  // P0040（5節）: attachmentIsCloudEventを使う（source固定済み）——targetのisCloudEventではない。
+  const resolveDisplayUri = useCallback(
+    (attachment: EventAttachment) => {
+      if (attachmentIsCloudEvent) {
+        return identity
+          ? cloudAttachmentRepository.resolveDisplayUri(attachment, identity)
+          : Promise.resolve(null);
+      }
+      return localAttachmentRepository.resolveDisplayUri(attachment);
+    },
+    [attachmentIsCloudEvent, identity]
+  );
   // Round13、P2: サムネイル・プレビューのlatest-wins判定に使う文脈識別子。
   // identity・保存先カレンダーのいずれかが変化するたびに値が変わる。
+  // P0040（5節）: 保存先ではなくsource（attachmentCalendarId）で判定する。
+  const attachmentScopeKey = `${attachmentIsCloudEvent ? "cloud" : "local"}:${identity?.userId ?? ""}:${identity?.sessionInstanceId ?? ""}:${attachmentCalendarId}`;
 
   const handleSubmit = async () => {
     // P0024（QA-F007 Batch3.4、11節）: 共有（クラウド）予定は、setSubmitted/setSaving/
     // onSaveのいずれよりも前にidentityの現在性を確認する。auth storeだけがA→Bへ
     // 切り替わり、このフォームインスタンスがまだReact再レンダー（identity-key remount）を
+    // 受けていない短い窓でhandleSubmitが呼ばれても、UI状態変化・保存処理・添付コミット・
     // Alertのいずれも一切発生させない（画面はまもなくremountされるため）。
     // 通常のcurrent shared form・local formは従来どおり動作する（ローカル予定は
     // requiresSharedIdentity=falseのためこのgateの対象外）。
     // P0041（8節）: targetだけでなくsourceが共有の場合もこのgateの対象にする
-    // （requiresSharedIdentity = sourceIsCloudEvent || isCloudEvent）。
+    // （requiresSharedIdentity = attachmentIsCloudEvent || isCloudEvent）。
     // [P0076 QA-F013] 同期的な二重呼び出し（レンダーを挟まない連続タップ等）を
     // 最初にブロックする。identityチェック・validationより前に置くことで、
     // 以後のどの分岐を通っても2回目の呼び出しはここで確実に止まる。
@@ -271,6 +329,7 @@ function NormalEventFormInner({
     }
 
     if (isEditing) {
+      // 編集画面: 添付は既に即時アップロード済みのため、保存タイミングと無関係
       // （従来通り、画面遷移も含めてonSave側に任せる）。保存失敗時はここで検知して
       // 画面遷移・成功表示を行わず、フォームの入力内容を保持したままエラーを知らせる。
       setSaving(true);
@@ -287,6 +346,8 @@ function NormalEventFormInner({
         if (isStaleMutationError(e)) return;
         submittingRef.current = false;
         setSaving(false);
+        // 編集画面の添付は保存タイミングと無関係に既に即時アップロード済みのため、
+        // 「添付はまだアップロードされていません」という新規作成向けの文言は使わない。
         Alert.alert(
           t("common.saveFailedTitle"),
           toFriendlyMessage(e instanceof Error ? e.message : undefined, t("friendlyError.localPersistenceFailed"), t)
@@ -305,6 +366,7 @@ function NormalEventFormInner({
       return;
     }
 
+    // 新規作成: 予定本体の保存が成功するまで、ドラフト添付は正式登録しない。
     setSaving(true);
     try {
       await onSave(value);
@@ -313,7 +375,7 @@ function NormalEventFormInner({
       if (isStaleMutationError(e)) return;
       submittingRef.current = false;
       setSaving(false);
-      Alert.alert(t("common.saveFailedTitle"), t("common.saveFailedMessage"));
+      Alert.alert(t("attachments.eventSaveFailedTitle"), t("attachments.eventSaveFailedMessage"));
       return;
     }
     if (requiresSharedIdentity && identity && !isCurrentSharedMutationIdentity(identity)) {
@@ -323,8 +385,32 @@ function NormalEventFormInner({
       return;
     }
 
+    const commitResult = await attachments.commitDraftAttachments({
+      eventId,
+      calendarId: isCloudEvent ? value.calendarId : undefined,
+    });
+
+    // Round15、P1-4: stale終了時はsetSaving(false)を呼ばない（他の保存フローと同じく、
+    // 画面はidentity変化により既にremountされているはずのため、古いHookインスタンス側の
+    // 状態更新を行わない）。以前はこの直前でsetSaving(false)を無条件に呼んでいた。
+    if (commitResult.stoppedDueToStaleIdentity) return;
+
+    // P0022（QA-F007 Batch3.2、8節）: commitResult.stoppedDueToStaleIdentityだけでなく、
+    // shared identityの現在性をsetSaving(false)より前に確認する（以前はこの確認を
+    // setSaving(false)の後に行っており、commit自体は打ち切らずに完了した直後の
+    // stale化でも、その古いHookインスタンス側でsetSaving(false)を呼んでしまっていた）。
+    if (requiresSharedIdentity && identity && !isCurrentSharedMutationIdentity(identity)) return;
+
     submittingRef.current = false;
     setSaving(false);
+
+    if (commitResult.failedCount > 0) {
+      Alert.alert(
+        t("attachments.commitPartialFailTitle"),
+        t("attachments.commitPartialFailMessage", { count: commitResult.failedCount })
+      );
+      return;
+    }
 
     // Round13、P1-4: onSaveCompleteを同期呼出しする直前の最終ゲート。
     if (requiresSharedIdentity && identity && !isCurrentSharedMutationIdentity(identity)) return;
@@ -361,7 +447,7 @@ function NormalEventFormInner({
   return (
     <View style={styles.container}>
       <PageLayout
-          header={
+        header={
           <ScreenHeader
             title={isEditing ? t("normalEventForm.editHeaderTitle") : t("normalEventForm.createHeaderTitle")}
             backLabel={t("common.cancel")}
@@ -464,6 +550,20 @@ function NormalEventFormInner({
             value={value.memo}
             placeholder={t("common.notEntered")}
             onPress={() => setActiveModal("memo")}
+          />
+          <EventAttachmentSection
+            attachments={attachments.attachments}
+            drafts={attachments.drafts}
+            deletingIds={attachments.deletingIds}
+            maxImagesPerEvent={attachments.limits.maxImagesPerEvent}
+            plan={attachments.limits.plan}
+            isCloudEvent={attachmentIsCloudEvent}
+            lastError={attachments.lastError}
+            onAddImage={attachments.addImage}
+            onRetry={attachments.retryAttachment}
+            onRemove={attachments.removeAttachment}
+            resolveDisplayUri={resolveDisplayUri}
+            scopeKey={attachmentScopeKey}
           />
         </SectionCard>
 
@@ -606,6 +706,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  // PageLayoutのcontent領域（flex:1）いっぱいに広がるよう明示する（Premiumで広告が消えて
   // 領域が広がったとき、ScrollView自体がそれに追従して伸びるようにするため）。
   scroll: {
     flex: 1,

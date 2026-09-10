@@ -1,6 +1,7 @@
 import React, { useMemo, useRef } from "react";
 import { Alert, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import * as Crypto from "expo-crypto";
 import { NormalEvent, isNormalEvent } from "@/types/event";
 import { RecurringEditScope, useAppData } from "@/context/AppDataContext";
 import { useAuth } from "@/context/AuthContext";
@@ -19,7 +20,13 @@ import {
   isCurrentSharedMutationIdentity,
   runCurrentSharedMutation,
 } from "@/auth/sharedMutationIdentity";
+import { fetchAttachmentMigrationSourceRowsForEvent } from "@/services/remoteAttachmentRepository";
 import { resolveEndDate } from "@/utils/time";
+import {
+  planAndRunAttachmentMigration,
+  StartAttachmentMigrationInput,
+} from "@/services/attachmentMigrationService";
+import { AttachmentMigrationTargetEventPatch } from "@/storage/attachmentMigrationRepository";
 
 function isStaleMutationError(e: unknown): boolean {
   return e instanceof Error && e.message === STALE_SHARED_MUTATION_IDENTITY_MESSAGE;
@@ -33,11 +40,14 @@ function isStaleMutationError(e: unknown): boolean {
 const UNSUPPORTED_CROSS_DOMAIN_MOVE_MESSAGE = "P0040_UNSUPPORTED_CROSS_DOMAIN_MOVE";
 const UNSUPPORTED_RECURRING_CALENDAR_MOVE_MESSAGE = "P0040_UNSUPPORTED_RECURRING_CALENDAR_MOVE";
 const MIGRATION_PENDING_RETRY_MESSAGE = "P0040_MIGRATION_PENDING_RETRY";
+const MIGRATION_CONFLICT_MESSAGE = "P0040_MIGRATION_CONFLICT";
 /**
+ * P0041（1節 invariant C、3節）: sourceの添付DB全rowのうち1件でもready以外・
  * soft-delete済みが混ざっている（=移行中/削除処理中の過渡状態）場合のmarker。
  * この状態ではsaveEvent・C14のどちらも一切呼ばず、いかなる副作用の前にfail-closedで
  * 拒否する。
  */
+const ATTACHMENT_SOURCE_NOT_STABLE_MESSAGE = "P0041_ATTACHMENT_SOURCE_NOT_STABLE";
 /**
  * [P0078 DATA-F014-001] 同一カレンダー内の共有予定編集CAS保存の非committed結果を、
  * 既存のmarker error規約に沿ってhandleSaveFailureへ伝える。conflictは「自分が開いた後に
@@ -54,6 +64,32 @@ function isMarkerError(e: unknown, message: string): boolean {
   return e instanceof Error && e.message === message;
 }
 
+/**
+ * P0040（9節）: C14 RPCへ送るtargetEvent patchのwhitelist変換。id/calendarId/
+ * createdBy/createdAt/updatedAt・任意フィールドのspreadは一切行わない。
+ * durationMinutes/restrictedApps/unlockConditionはFocusTask専用フィールドであり、
+ * このscreenが扱うNormalEventには存在しないため常にnullを送る
+ * （FocusTask編集は別画面・本batchの対象外）。
+ */
+function buildTargetEventPatch(updated: NormalEvent): AttachmentMigrationTargetEventPatch {
+  return {
+    title: updated.title,
+    date: updated.date,
+    startTime: updated.startTime,
+    endTime: updated.endTime,
+    allDay: updated.allDay,
+    location: updated.location ?? null,
+    durationMinutes: null,
+    restrictedApps: null,
+    unlockCondition: null,
+    notification: updated.notification,
+    repeat: updated.repeat,
+    memo: updated.memo ?? null,
+    completed: updated.completed,
+    recurringGroupId: updated.recurringGroupId ?? null,
+    recurrenceIndex: updated.recurrenceIndex ?? null,
+  };
+}
 
 /**
  * P0040（4節）: edit-session immutable source snapshot。編集セッション開始時点の
@@ -106,6 +142,7 @@ export default function EditEventScreen() {
     sharedCalendars,
     saveEvent,
     saveSharedNormalEventWithVersionCheck,
+    reflectCommittedSharedEventChange,
     removeEvent,
     updateRecurringEvents,
     removeRecurringEvents,
@@ -207,6 +244,7 @@ export default function EditEventScreen() {
 
     // Route E（6節/10節）: 端末内↔共有の相互移動はfail-closed。DATA-F007-005
     // （local↔shared移動の実装）は本batch対象外・明示的に実装禁止のため、
+    // いかなる副作用（event DB write・attachment Storage・RPC・cleanup）の前に拒否する。
     if (wasCloudSource !== isCloudTarget) {
       throw new Error(UNSUPPORTED_CROSS_DOMAIN_MOVE_MESSAGE);
     }
@@ -249,12 +287,107 @@ export default function EditEventScreen() {
       return;
     }
 
-    // Portfolio Edition: 共有→共有のカレンダー移動。
-    // 移動対象は予定行だけなので、通常の保存経路をそのまま使う。
-    await runCurrentSharedMutation(identity, async (assertCurrent) => {
-      await saveEvent(updated);
-      assertCurrent();
-    });
+    // calendar変更を伴う共有→共有の移動。添付manifestをsourceの権威（remote DB）から
+    // 取得して初めてfail-closedかC14続行かが決まる。
+    // P0042（1節/3節）: 添付が真に0件でもordinary saveEvent()へは絶対にフォールバックしない
+    // ——read（ここでのfetch）とUPDATE（saveEvent）が別transactionのままだと、その間に
+    // 別端末からの添付INSERTがcommitしてもclient側は検知できず、0019のguardと矛盾した
+    // 状態のままlocal optimistic更新・router成功へ進んでしまうTOCTOUが生じる
+    // （P0041のバグ）。shared→sharedのcalendar変更は0件を含め常にC14 atomic RPCだけが
+    // 成立経路——RPC内部のFOR UPDATE・total row count一致チェックが真の権威。
+    // P0040（7節）/P0041（2節）: manifest取得のawaitの直前・直後にidentity gateを置く
+    // （fetchAttachmentMigrationSourceRowsForEvent自身もawaitCurrentSharedOperation経由で
+    // 内部的に同じ3点チェックを行うが、呼び出し側でも独立に確認する多層防御）。
+    if (!isCurrentSharedMutationIdentity(identity)) {
+      throw new Error(STALE_SHARED_MUTATION_IDENTITY_MESSAGE);
+    }
+    // P0041（1節 invariant A/B/C、3節）: UI表示用のdeleted_at絞り込み・ready絞り込みを
+    // 一切行わない「全row」を権威として使う。この全rowこそがDBの実態そのものであり、
+    // ready-filterした部分集合を「0件」や「移行対象」と誤認してはならない。
+    const sourceRows = await fetchAttachmentMigrationSourceRowsForEvent(sourceSnapshot.eventId, identity);
+    if (!isCurrentSharedMutationIdentity(identity)) {
+      throw new Error(STALE_SHARED_MUTATION_IDENTITY_MESSAGE);
+    }
+
+    // invariant C: 1件でもready以外・soft-delete済みが混ざっていれば、移行中/削除処理中の
+    // 過渡状態とみなし、いかなる副作用（saveEvent・offline queue・C14 plan・Storage・RPC・
+    // navigation）の前にfail-closedで拒否する。「一部だけ移行してready分は後で」も
+    // 「readyでない分を無視してordinary saveへフォールバック」も禁止。
+    const hasUnstableSourceRow = sourceRows.some(
+      (row) => row.uploadStatus !== "ready" || row.deletedAt != null
+    );
+    if (hasUnstableSourceRow) {
+      throw new Error(ATTACHMENT_SOURCE_NOT_STABLE_MESSAGE);
+    }
+
+    // Route C（invariant B、P0042で0件も含むよう拡張）: 残ったsourceRows（0件を含む、
+    // 全rowがready・deletedAtなしであることは直前で確認済み）でC14 client migration
+    // coreのみを使う。前後を問わず通常のevents.upsert()（saveEvent）を一切呼ばない・
+    // 二重実行もしない（6節）。manifestはsourceRowsの全件（ready部分集合ではない）。
+    // attachments=[]の場合、Client Migration Core側は各stage loopが0回実行され、
+    // RPCへはmanifest=[]で1回だけ渡る（0019のempty manifest contractが正当に扱う）。
+    const migrationInput: StartAttachmentMigrationInput = {
+      ownerUserId: identity.userId,
+      eventId: sourceSnapshot.eventId,
+      sourceCalendarId: sourceSnapshot.sourceCalendarId,
+      targetCalendarId: updated.calendarId,
+      // P0040（8節）: expectedUpdatedAtの権威は編集セッション開始時点のsnapshot。
+      // new Date()・クライアント保存時刻・target側の値・再fetchした値のいずれも使わない。
+      expectedUpdatedAt: sourceSnapshot.expectedUpdatedAt,
+      targetEvent: buildTargetEventPatch(updated),
+      attachments: sourceRows.map((a) => ({
+        sourceAttachmentId: a.id,
+        // 8節: destination IDはこの呼び出し元（caller）がplan作成時に一度だけ生成する
+        // （attachmentMigrationServiceのAttachmentMigrationPlanAttachmentInputが定める
+        // 既存contract。retryはC14 core自身が同じdurable値を再利用するため、
+        // ここで毎回生成し直すのはこの最初の1回だけでよい）。
+        destinationAttachmentId: Crypto.randomUUID(),
+        mimeType: a.mimeType,
+        byteSize: a.byteSize,
+        width: a.width,
+        height: a.height,
+        sortOrder: a.sortOrder,
+      })),
+    };
+
+    const result = await planAndRunAttachmentMigration(migrationInput, identity);
+
+    switch (result.status) {
+      case "committed": {
+        // P0040（14節）: 反映前に必ず現在identityを再確認する。stale化していれば
+        // 反映もnavigationも行わずstale経路へ委ねる（durable recordは保持され、
+        // fresh identityでの再開に委ねる——ここで手動のfallbackは行わない）。
+        if (!isCurrentSharedMutationIdentity(identity)) {
+          throw new Error(STALE_SHARED_MUTATION_IDENTITY_MESSAGE);
+        }
+        // 反映する値は必ずcommittedUpdatedAt（result由来）。古いexpectedUpdatedAtや
+        // updated.updatedAtは使わない。
+        reflectCommittedSharedEventChange(
+          { ...updated, updatedAt: result.committedUpdatedAt },
+          identity.userId,
+          identity.sessionInstanceId
+        );
+        return;
+      }
+      case "stale":
+        throw new Error(STALE_SHARED_MUTATION_IDENTITY_MESSAGE);
+      case "pending-retry":
+      case "not-found":
+        // P0040（13節）: 通常のsave成功として閉じない。events.upsert()への
+        // フォールバック・代替move・手動Storage cleanupは一切行わない。
+        // 既存のretry lifecycle（15節）が後で自動的に確認・再試行する。
+        throw new Error(MIGRATION_PENDING_RETRY_MESSAGE);
+      case "conflict":
+        // P0040（13節）: identityが既にstaleならAlertを出さない（stale経路を優先）。
+        if (!isCurrentSharedMutationIdentity(identity)) {
+          throw new Error(STALE_SHARED_MUTATION_IDENTITY_MESSAGE);
+        }
+        throw new Error(MIGRATION_CONFLICT_MESSAGE);
+      default: {
+        const exhaustiveCheck: never = result;
+        throw exhaustiveCheck;
+      }
+    }
   };
 
   const handleSaveFailure = (e: unknown) => {
@@ -269,6 +402,14 @@ export default function EditEventScreen() {
     }
     if (isMarkerError(e, MIGRATION_PENDING_RETRY_MESSAGE)) {
       Alert.alert(t("common.saveFailedTitle"), t("eventDetail.migrationPendingRetryMessage"));
+      return;
+    }
+    if (isMarkerError(e, MIGRATION_CONFLICT_MESSAGE)) {
+      Alert.alert(t("common.saveFailedTitle"), t("eventDetail.migrationConflictMessage"));
+      return;
+    }
+    if (isMarkerError(e, ATTACHMENT_SOURCE_NOT_STABLE_MESSAGE)) {
+      Alert.alert(t("common.saveFailedTitle"), t("eventDetail.attachmentSourceNotStableMessage"));
       return;
     }
     if (isMarkerError(e, NORMAL_EVENT_EDIT_CONFLICT_MESSAGE)) {
@@ -368,6 +509,7 @@ export default function EditEventScreen() {
       async (scope) => {
         try {
           // P0040（10節）: calendar変更を伴うfollowing/allは、いかなる副作用の前に
+          // fail-closedで拒否する（event DB write 0・attachment Storage 0・
           // C14 plan persist 0・RPC 0・navigation success 0）。「今は一部だけ移動して
           // 残りは後で」は明示的に禁止（10節）——scope選択のこの時点で即座に停止する。
           if (scope !== "single" && updated.calendarId !== sourceSnapshot.sourceCalendarId) {

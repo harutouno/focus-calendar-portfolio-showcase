@@ -14,6 +14,8 @@ export interface SharedCalendar {
   ownerId: string;
   createdAt: string;
   updatedAt: string;
+  /** 未設定ならnull/undefined。その場合はテーマカラーのデフォルトカバーを表示する */
+  coverImageUrl?: string;
 }
 
 export interface CalendarMembership {
@@ -61,6 +63,8 @@ export interface PendingInvite {
   calendarId: string;
   calendarName: string;
   calendarColor: string;
+  /** 未設定ならundefined。calendar-coversバケット内のStorageパス、または旧形式の公開URL */
+  calendarCoverImageUrl?: string;
   role: Extract<CalendarRole, "editor" | "viewer">;
   createdAt: string;
   expiresAt: string;

@@ -28,7 +28,7 @@
 ┌──────▼──────────────┐          ┌─────────▼───────────────────┐
 │ AsyncStorage         │          │ Supabase                    │
 │ (src/storage/)       │          │  Auth        認証           │
-│  eventsRepository    │          │  PostgreSQL  テーブル 5     │
+│  eventsRepository    │          │  PostgreSQL  テーブル 11    │
 │  syncQueueRepository │◄────────►│  RLS         権限の正本     │
 │  focusSession...     │  同期     │  RPC         招待・退出等   │
 └──────────────────────┘          └─────────────────────────────┘

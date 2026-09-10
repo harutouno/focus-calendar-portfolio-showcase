@@ -104,10 +104,18 @@ AI の依頼も同様に、依頼の所有者を明示的な操作時点で固�
 
 `account_write_allowed()` は `p_user_id is not null` と `profiles` への実在を
 同時に要求する定義であり、この 2 条件を満たす認証済みユーザーに対してのみ true を返します
-（`supabase/migrations/0002_portfolio_compat_account_write_allowed.sql`）。
+（`supabase/migrations/0007_portfolio_compat_account_write_allowed.sql`）。
+
+添付ファイル（`event_attachments`）・カレンダーカバー画像（Storage の `calendar-covers`
+バケット）は、いずれも `calendar_id` を自テーブルへ非正規化せず、親（予定・カレンダー）を
+辿って `is_calendar_member()` を評価する（1 節と同じ RLS 設計）。この一節の 18 項目の
+実測は共有カレンダー・予定に対するもので、添付・カバー画像専用の同種の実測は
+本リポジトリでは行っていない。
 
 ## 7. 本リポジトリの適用範囲外
 
 - 本番環境での運用実績（検証はローカル環境のみ）
 - 外部 LLM を接続した場合の安全性（接続実装を含まない）
-- 課金・広告・添付・退会に関する安全性（該当機能を含まない）
+- 課金導線・広告・退会に関する安全性（該当機能を含まない）
+- 添付ファイル・カレンダーカバー画像の RLS を、1 節と同水準（第三者アクセス不可の実測）で
+  個別に検証すること（設計は 1 節と同じパターンを踏襲しているが、専用の実測は未実施）

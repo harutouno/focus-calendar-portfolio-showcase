@@ -6,6 +6,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { AuthProvider } from "@/context/AuthContext";
 import { AppDataProvider } from "@/context/AppDataContext";
+import { PremiumProvider } from "@/context/PremiumContext";
 import { LocaleProvider } from "@/context/LocaleContext";
 import { HolidayRegionProvider } from "@/context/HolidayRegionContext";
 import { AppDataInitializationGate } from "@/components/common/AppDataInitializationGate";
@@ -61,6 +62,7 @@ export default function RootLayout() {
         <LocaleProvider>
           <HolidayRegionProvider>
             <AuthProvider>
+              <PremiumProvider>
                 <AppDataProvider>
                   <StatusBar style="dark" />
                   <AppDataInitializationGate>
@@ -98,6 +100,7 @@ export default function RootLayout() {
                     </Stack>
                   </AppDataInitializationGate>
                 </AppDataProvider>
+              </PremiumProvider>
             </AuthProvider>
           </HolidayRegionProvider>
         </LocaleProvider>

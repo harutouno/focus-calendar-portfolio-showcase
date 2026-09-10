@@ -19,14 +19,38 @@
 -- 場合は、専用RPC・譲渡相手の承認・上限確認・calendar_membersとの整合性維持を備えた
 -- 別工程として実装すること。
 --
--- 0012〜0015は無編集。適用順は 0012 → 0013 → 0014 → 0015 → 0016。
+-- 0012〜0015は無編集。適用順は 0012 → 0013 → 0014 → 0015 → 0016。0016自体はai_usage_*
+-- テーブル/RPCへ一切触れないため、この0016単体の適用にai-support Edge Functionの
+-- 再デプロイは不要。
 
 -- ============================================================
--- 1. Portfolio Edition の共有カレンダー作成上限（固定）
---
--- エンタイトルメント参照ごと削除し、無料枠の値を固定ルールとして採用する。
--- クライアント側の定数（src/constants/calendarLimits.ts）と同じ値。
+-- 1. is_premium_active_for(p_user_id): 対象ユーザーを明示的に指定するプレミアム判定
+-- ============================================================
+-- 0014のis_premium_active()はauth.uid()固定（呼び出し本人の判定専用）。calendarsの
+-- トリガーはNEW.owner_id（作成・譲渡先の対象所有者）を判定する必要があり、auth.uid()に
+-- 暗黙依存すると「本人以外の所有者を指定した経路」で誤判定しうる。そのため対象user_idを
+-- 明示的に受け取る内部専用版を追加する（一般ユーザーへは絶対にgrantしない＝他人の資格を
+-- 取得できるRPCにはしない）。
+create or replace function public.is_premium_active_for(p_user_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1 from public.user_entitlements e
+    where e.user_id = p_user_id
+      and e.entitlement_key = 'premium'
+      and e.status = 'active'
+      and e.starts_at <= now()
+      and (e.expires_at is null or e.expires_at > now())
+  );
+$$;
 
+revoke all on function public.is_premium_active_for(uuid) from public;
+
+-- ============================================================
 -- 2. enforce_owned_shared_calendar_limit(): BEFORE INSERT
 -- ============================================================
 -- 対象所有者ごとにトランザクションスコープのadvisory lockで直列化してから件数を数え直す
@@ -34,8 +58,10 @@
 -- レース）を防ぐ。ロックはトランザクション終了時に自動解放され、対象ユーザーにつき
 -- 単一の名前空間しか使わないため、ロック順序を意識する必要はない。
 --
--- クライアントとサーバーの上限を同じ値に保つ。この定数を変更する場合は、
--- src/constants/calendarLimits.ts の値も必ず合わせて変更すること。
+-- 上限値（無料3・プレミアム10）はsrc/constants/calendarLimits.tsの
+-- FREE_SHARED_CALENDAR_LIMIT/PREMIUM_SHARED_CALENDAR_LIMITと手動で同期する
+-- （0008のenforce_attachment_quota()がattachmentLimits.tsと手動同期しているのと同じ
+-- 既存の運用方式）。この定数を変更する場合は、必ずこの関数の数値も合わせて変更すること。
 --
 -- 単独修正(2026-08、補正)でINSERT専用に単純化した。owner_idは3節のトリガーで
 -- 変更自体を禁止するため、「譲渡時に新所有者の上限を確認する」という分岐は
@@ -48,13 +74,14 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-
+  v_is_premium boolean;
   v_limit int;
   v_owned_count int;
 begin
   perform pg_advisory_xact_lock(hashtext(new.owner_id::text));
 
-  v_limit := 3;
+  v_is_premium := public.is_premium_active_for(new.owner_id);
+  v_limit := case when v_is_premium then 10 else 3 end;
 
   select count(*) into v_owned_count
     from public.calendars c
@@ -110,6 +137,7 @@ create trigger calendars_prevent_owner_change
 
 -- verify (許可されているロールが内部関数を直接実行できないことの確認):
 -- select grantee, privilege_type from information_schema.routine_privileges
+--   where routine_name in ('is_premium_active_for', 'enforce_owned_shared_calendar_limit');
 -- verify (無料ユーザーで3件所有した状態から4件目を試み、例外を確認する):
 -- insert into public.calendars (name, color, owner_id) values ('4th', '#000000', '<free-user-uuid>');
 -- verify (owner_idの変更が拒否されることの確認。オーナー本人のセッションで実行する):

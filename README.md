@@ -39,6 +39,12 @@ React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成し�
   （詳細は [docs/SECURITY.md](docs/SECURITY.md)）
 - オフライン時の変更は同期キューへ保持し、復帰時にユーザー単位で分離して処理する
 
+### 画像添付・カレンダーカバー
+- 予定への画像添付（作成時はドラフト→保存成功後に確定登録、編集時は即時アップロード）
+- 端末内保存（マイカレンダー）と共有カレンダーで容量上限・保存先を分離
+- カレンダーのカバー画像設定・変更・削除（マイカレンダーは端末内、共有カレンダーはオーナーのみ、Storageの署名付きURLで配信）
+- 共有カレンダー間で予定を移動する際、添付ファイルもRPCで原子的に移す（不安定な状態の添付は移動前に検出して拒否する）
+
 ### フォーカスタイマー・記録分析
 - 集中タスクのタイマー実行、中断記録、完了記録
 - 実行履歴の一覧と、日 / 週 / 月の集計
@@ -65,7 +71,7 @@ React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成し�
 | 認証 | Supabase Auth（メール、Google、Apple） |
 | テスト | Jest + jest-expo + React Test Renderer |
 
-規模: `app` 25 ファイル / `src` 157 ファイル / migration 15 / テスト 15 スイート・225 ケース
+規模: `app` 28 ファイル / `src` 188 ファイル / migration 27 / テスト 15 スイート・225 ケース
 
 ---
 

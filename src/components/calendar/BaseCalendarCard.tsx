@@ -2,7 +2,7 @@ import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SectionCard } from "@/components/common/SectionCard";
-import { DefaultCalendarCover } from "./DefaultCalendarCover";
+import { CoverImage } from "./CoverImage";
 import { colors } from "@/theme/colors";
 import { minTapSize, radius, spacing } from "@/theme/spacing";
 import { useLocale } from "@/context/LocaleContext";
@@ -42,7 +42,7 @@ export function BaseCalendarCard({ calendar, visible, onToggleVisible, onPressMe
       </Pressable>
       <Pressable style={styles.tapArea} onPress={onPressMenu} accessibilityRole="button">
         <View style={styles.cover}>
-          <DefaultCalendarCover color={calendar.color} icon="person-outline" iconSize={22} />
+          <CoverImage uri={calendar.coverImageUri} color={calendar.color} icon="person-outline" iconSize={22} />
         </View>
         <View style={styles.textWrap}>
           <View style={styles.nameRow}>

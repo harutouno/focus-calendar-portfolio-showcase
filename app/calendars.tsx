@@ -34,8 +34,10 @@ import { generateId } from "@/utils/id";
 import { NewCalendarModal } from "@/components/forms/NewCalendarModal";
 import { classifySharedCalendars, filterSharedCalendarsByQuery } from "@/utils/calendarListRows";
 import { eventDisplayModeFromOverlay } from "@/utils/eventDisplayMode";
+import { usePremiumStatus } from "@/hooks/usePremiumStatus";
 import {
-  SHARED_CALENDAR_LIMIT,
+  FREE_SHARED_CALENDAR_LIMIT,
+  PREMIUM_SHARED_CALENDAR_LIMIT,
   countOwnedSharedCalendars,
   getMyCalendarLimit,
   isBaseCalendar,
@@ -99,6 +101,7 @@ export default function CalendarsScreen() {
     declinePendingInvite,
   } = useAppData();
   const { user, isSupabaseConfigured } = useAuth();
+  const isPremium = usePremiumStatus();
 
   const [tab, setTab] = useState<CalendarTabKey>("personal");
   const [createModalVisible, setCreateModalVisible] = useState(false);
@@ -171,8 +174,8 @@ export default function CalendarsScreen() {
     ]);
   };
 
-  const myCalendarLimit = getMyCalendarLimit();
-  const sharedCalendarLimit = SHARED_CALENDAR_LIMIT;
+  const myCalendarLimit = getMyCalendarLimit(isPremium);
+  const sharedCalendarLimit = isPremium ? PREMIUM_SHARED_CALENDAR_LIMIT : FREE_SHARED_CALENDAR_LIMIT;
 
   const handleRequestLogin = () => {
     router.push({ pathname: "/auth/sign-in", params: { returnTo: "/calendars" } });
@@ -199,7 +202,7 @@ export default function CalendarsScreen() {
   const ownedSharedCalendars = [...solo, ...owner];
   const myCalendarCount = totalMyCalendars(userCalendars);
   const ownedSharedCalendarCount = countOwnedSharedCalendars(sharedCalendars);
-  const myCalendarRemaining = remainingMyCalendars(userCalendars);
+  const myCalendarRemaining = remainingMyCalendars(userCalendars, isPremium);
   const sharedCalendarRemaining = sharedCalendarLimit - ownedSharedCalendarCount;
 
   const baseCalendar = userCalendars.find((c) => isBaseCalendar(c.id));
@@ -474,6 +477,7 @@ export default function CalendarsScreen() {
                     key={s.calendar.id}
                     name={s.calendar.name}
                     color={s.calendar.color}
+                    coverImageUrl={s.calendar.coverImageUrl}
                     icon="people-outline"
                     statusText={t("calendars.manageInvitesRowSubtitle")}
                     chevronOnly
