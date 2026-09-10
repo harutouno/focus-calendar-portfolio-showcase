@@ -189,6 +189,7 @@ RLS 検証の 18 項目の内訳は、第三者 12 / 所有者・メンバー 4 
 | カレンダー画面の入口 | [app/index.tsx](app/index.tsx) |
 | 共有カレンダーのサービス層 | [src/services/calendarService.ts](src/services/calendarService.ts) |
 | 添付ファイルの画面部品 | [src/components/attachments/EventAttachmentSection.tsx](src/components/attachments/EventAttachmentSection.tsx) |
+| 「後始末の失敗」と「本処理の失敗」を分離する境界 | [src/utils/postPrimary.ts](src/utils/postPrimary.ts) |
 | RLS の定義 | [supabase/migrations/0001_init.sql](supabase/migrations/0001_init.sql) |
 | AI 提案から予定への変換 | [src/utils/aiScheduleToEvent.ts](src/utils/aiScheduleToEvent.ts) |
 
