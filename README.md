@@ -2,9 +2,10 @@
 
 Focus Calendar は、予定管理・共有・実行記録を統合するモバイルアプリケーションです。
 本リポジトリは、選考時の技術レビューを目的として整理した Portfolio Edition です。
-共有カレンダーの権限設計、オフライン同期、Demo AI の予定追加フローを中心に記載します。
+共有カレンダーの権限設計、画像添付・カバー画像、オフライン同期、Demo AI の予定追加フローを
+中心に記載します。
 
-React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成しています。
+React Native (Expo) と Supabase (PostgreSQL / Row Level Security / Storage) で構成しています。
 
 読む順序と各ファイルの確認事項は [docs/REVIEW_GUIDE.md](docs/REVIEW_GUIDE.md) に記載しています。
 
@@ -18,6 +19,7 @@ React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成し�
 - 集中タスクの実行結果をセッションとして記録する
 - 記録を日 / 週 / 月の単位で集計する
 - カレンダーを他ユーザーと共有し、ロールごとに操作範囲を分ける
+- 予定・カレンダーに画像を添付する
 
 ---
 
@@ -42,8 +44,12 @@ React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成し�
 ### 画像添付・カレンダーカバー
 - 予定への画像添付（作成時はドラフト→保存成功後に確定登録、編集時は即時アップロード）
 - 端末内保存（マイカレンダー）と共有カレンダーで容量上限・保存先を分離
-- カレンダーのカバー画像設定・変更・削除（マイカレンダーは端末内、共有カレンダーはオーナーのみ、Storageの署名付きURLで配信）
-- 共有カレンダー間で予定を移動する際、添付ファイルもRPCで原子的に移す（不安定な状態の添付は移動前に検出して拒否する）
+- カレンダーのカバー画像設定・変更・削除（マイカレンダーは端末内、共有カレンダーはオーナーのみ、
+  Storage の署名付き URL で配信）
+- 共有カレンダー間で予定を移動する際、添付ファイルも RPC で原子的に移す
+  （不安定な状態の添付は移動前に検出して拒否する）
+- 添付・カバー画像とも `calendar_id` を自テーブルへ非正規化せず、親（予定・カレンダー）を
+  辿って RLS を評価する（招待・権限と同じ設計、詳細は [docs/DECISIONS.md](docs/DECISIONS.md)）
 
 ### フォーカスタイマー・記録分析
 - 集中タスクのタイマー実行、中断記録、完了記録
@@ -67,7 +73,7 @@ React Native (Expo) と Supabase (PostgreSQL / Row Level Security) で構成し�
 | ルーティング | Expo Router 6（ファイルベース） |
 | 状態管理 | React Context による集約（`AppDataContext`） |
 | 端末内保存 | AsyncStorage（リポジトリ層で抽象化） |
-| バックエンド | Supabase（PostgreSQL / Auth / Row Level Security / RPC） |
+| バックエンド | Supabase（PostgreSQL / Auth / Row Level Security / RPC / Storage） |
 | 認証 | Supabase Auth（メール、Google、Apple） |
 | テスト | Jest + jest-expo + React Test Renderer |
 
@@ -93,7 +99,8 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=
 ```
 
 Google / Apple サインインを確認する場合のみ、`.env.example` の OAuth クライアント ID を設定します。
-未設定の場合はメール認証で動作を確認できます。
+未設定の場合はメール認証で動作を確認できます。画像添付・カバー画像は追加の設定なしで、
+`npx supabase start` が起動する Storage（`calendar-covers` バケット等）に対して動作します。
 
 アプリを起動せずに静的検証のみ行う場合は次を実行します。
 
@@ -134,7 +141,10 @@ npx jest
    影響行数を確認して成否を判定する
 3. 共有操作は認証セッションへ紐づけて実行する。処理途中でアカウントが切り替わった場合、
    後続の副作用を実行しない
-4. リポジトリに秘密情報を含めない（`.env` は追跡対象外、`.env.example` は変数名のみ）
+4. 子テーブル（添付・カレンダーカバー）の権限は `calendar_id` を非正規化せず、
+   親（予定・カレンダー）を辿って導出する。子テーブル側に権限列を複製すると、
+   親と食い違った時点で権限が二重の正本を持つことになる
+5. リポジトリに秘密情報を含めない（`.env` は追跡対象外、`.env.example` は変数名のみ）
 
 ---
 
@@ -148,7 +158,7 @@ npx jest
 | lint `npm run lint` | エラー 0 / 警告 0 |
 | 型チェック `npx tsc --noEmit` | エラー 0 |
 | テスト `npx jest` | 15 スイート / 225 ケース 成功 |
-| migration 適用（PostgreSQL 17 / 使い捨て DB） | 15/15 適用成功 |
+| migration 適用（PostgreSQL 17 / 使い捨て DB、fresh reset） | 27/27 適用成功 |
 | RLS 3 ユーザー検証（PostgreSQL 17 / 使い捨て DB） | 18/18 成功 |
 | 秘密情報スキャン | 検出 0 |
 
@@ -162,6 +172,10 @@ RLS 検証の 18 項目の内訳は、第三者 12 / 所有者・メンバー 4 
 - 招待の発行（拒否） / 招待一覧の取得（0 件）
 - カレンダー名の変更・削除（0 行）
 
+添付ファイル・カレンダーカバー画像の RLS は、上記と同じ設計パターン（親テーブルを辿って
+`is_calendar_member` を評価）を踏襲していますが、同水準の 3 ユーザー実測はまだ行っていません
+（[docs/SECURITY.md](docs/SECURITY.md) 7 節に明記）。
+
 ---
 
 ## 8. 参照ファイル
@@ -174,6 +188,7 @@ RLS 検証の 18 項目の内訳は、第三者 12 / 所有者・メンバー 4 
 | セキュリティ設計 | [docs/SECURITY.md](docs/SECURITY.md) |
 | カレンダー画面の入口 | [app/index.tsx](app/index.tsx) |
 | 共有カレンダーのサービス層 | [src/services/calendarService.ts](src/services/calendarService.ts) |
+| 添付ファイルの画面部品 | [src/components/attachments/EventAttachmentSection.tsx](src/components/attachments/EventAttachmentSection.tsx) |
 | RLS の定義 | [supabase/migrations/0001_init.sql](supabase/migrations/0001_init.sql) |
 | AI 提案から予定への変換 | [src/utils/aiScheduleToEvent.ts](src/utils/aiScheduleToEvent.ts) |
 
@@ -181,10 +196,14 @@ RLS 検証の 18 項目の内訳は、第三者 12 / 所有者・メンバー 4 
 
 ## 9. Portfolio Edition の適用範囲
 
-添付画像・画像アップロード、課金・プレミアム、広告、退会処理、外部 LLM 呼び出しと使用量課金は
-本リポジトリに含めていません。
+広告、課金導線（ストア購入・レシート検証）、退会処理、外部 LLM 呼び出しと使用量課金は
+本リポジトリに含めていません。いずれも動作確認に外部サービスの資格情報または契約が必要であり、
+レビュー環境で再現できない構成になるためです。安全に再現可能なレビュー範囲へ限定する目的で
+対象外としています。
 
-いずれも動作確認に外部サービスの資格情報または契約が必要であり、
-レビュー環境で再現できない構成になるためです。
-安全に再現可能なレビュー範囲へ限定する目的で対象外としています。
+画像添付・カレンダーカバーは Supabase Storage のみで完結し外部の有料サービスを必要としないため
+含めています。プレミアム資格を判定するテーブル・RPC（`user_entitlements` /
+`is_premium_active_for()`）も同じ理由で含めていますが、資格を実際に `premium` へ変更する手段
+（ストア購入・レシート検証の UI）は対象外のため、この判定は常に `free` を返します。
+
 判断の詳細は [docs/DECISIONS.md](docs/DECISIONS.md) に記載しています。
